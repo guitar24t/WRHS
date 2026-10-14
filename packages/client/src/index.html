@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="__CSP__">
+<meta name="referrer" content="no-referrer">
+<title>WRHS Remote Desktop</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --border: #d9dde5;
+    --accent: #2457d6; --accent-text: #ffffff; --ok: #12805c; --warn: #9a6400; --bad: #b42318;
+    --ok-bg: #e7f6ef; --warn-bg: #fff4dc; --bad-bg: #fdecea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b1f27; --text: #e6e9ef; --muted: #9aa3b2; --border: #2e3440;
+      --accent: #6b8cff; --accent-text: #0b0d12; --ok: #4ccf97; --warn: #f0b545; --bad: #ff6b5f;
+      --ok-bg: #12291f; --warn-bg: #2d2412; --bad-bg: #331614;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--panel);
+    border-bottom: 1px solid var(--border); white-space: nowrap; min-width: 0; }
+  header #details { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  #device { margin: 16px 0 0; }
+  header .brand { font-weight: 700; letter-spacing: .02em; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+    font-size: 13px; background: var(--warn-bg); color: var(--warn); }
+  .badge.ok { background: var(--ok-bg); color: var(--ok); }
+  .badge.bad { background: var(--bad-bg); color: var(--bad); }
+  .badge svg { width: 14px; height: 14px; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .spacer { flex: 1; }
+  main { flex: 1; display: flex; min-height: 0; }
+  .view { margin: auto; width: min(440px, calc(100% - 32px)); background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; }
+  .view h1 { font-size: 20px; margin: 0 0 4px; }
+  .view p.sub { margin: 0 0 18px; color: var(--muted); }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
+  input { width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
+    color: var(--text); font: inherit; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { font: inherit; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    padding: 8px 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); width: 100%; margin-top: 18px; padding: 10px; }
+  button:disabled { opacity: .6; cursor: default; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 14px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; overflow-wrap: anywhere; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .msg { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
+  .msg.error { background: var(--bad-bg); color: var(--bad); }
+  .msg.warn { background: var(--warn-bg); color: var(--warn); }
+  .targets { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; }
+  .targets button { width: 100%; text-align: left; padding: 12px; }
+  .targets .proto { float: right; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  #remote { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #toolbar { display: flex; gap: 8px; padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  #display { flex: 1; position: relative; overflow: hidden; background: #000; outline: none; }
+  #display > div { position: absolute; left: 0; top: 0; }
+  #hosted-banner { background: var(--warn-bg); color: var(--warn); padding: 8px 16px; font-size: 14px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<script id="wrhs-config" type="application/json">__CONFIG__</script>
+<header>
+  <span class="brand">WRHS</span>
+  <span id="security" class="badge"><span id="security-text">Not connected</span></span>
+  <span id="details" class="meta"></span>
+</header>
+<div id="hosted-banner" hidden>
+  You opened this page from the relay server. A proxy that actively rewrites web pages could have altered it,
+  so this mode only protects against passive inspection. For full protection, use the offline launcher file.
+</div>
+<main>
+  <section id="view-connect" class="view">
+    <h1>Connect to your desktop</h1>
+    <p class="sub">Traffic is encrypted end to end between this page and your agent. Proxies only see ciphertext.</p>
+    <dl id="profile" class="kv" hidden>
+      <dt>Agent</dt><dd id="profile-name"></dd>
+      <dt>Relay</dt><dd id="profile-relay"></dd>
+      <dt>Fingerprint</dt><dd id="profile-fp" class="mono"></dd>
+    </dl>
+    <form id="manual" hidden>
+      <label for="relay-url">Relay URL</label>
+      <input id="relay-url" type="url" placeholder="https://relay.example.com" required>
+      <label for="agent-key">Agent public key</label>
+      <input id="agent-key" class="mono" placeholder="base64url key printed by wrhs-agent init" required autocomplete="off" spellcheck="false">
+    </form>
+    <button id="connect-btn" class="primary" type="button">Connect</button>
+    <div id="connect-msg" class="msg" hidden></div>
+    <p id="device" class="meta"></p>
+  </section>
+
+  <section id="view-login" class="view" hidden>
+    <h1>Sign in</h1>
+    <p class="sub">Your credentials travel only inside the encrypted tunnel.</p>
+    <form id="login-form">
+      <label for="user">User name</label>
+      <input id="user" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <div id="totp-row">
+        <label for="totp">Authenticator code</label>
+        <input id="totp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code">
+      </div>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+    <div id="login-msg" class="msg error" hidden></div>
+  </section>
+
+  <section id="view-targets" class="view" hidden>
+    <h1>Choose a desktop</h1>
+    <ul id="target-list" class="targets"></ul>
+    <form id="rdp-creds" hidden>
+      <p class="sub" style="margin-top:16px">Windows credentials for <strong id="creds-target"></strong></p>
+      <label for="rdp-user">User name</label>
+      <input id="rdp-user" autocomplete="off">
+      <label for="rdp-domain">Domain (optional)</label>
+      <input id="rdp-domain" autocomplete="off">
+      <label for="rdp-pass">Password</label>
+      <input id="rdp-pass" type="password" autocomplete="off">
+      <button class="primary" type="submit">Connect</button>
+    </form>
+    <div id="targets-msg" class="msg" hidden></div>
+  </section>
+
+  <section id="view-closed" class="view" hidden>
+    <h1 id="closed-title">Disconnected</h1>
+    <div id="closed-msg" class="msg"></div>
+    <button id="reconnect-btn" class="primary" type="button">Start over</button>
+  </section>
+
+  <section id="remote" hidden>
+    <div id="toolbar">
+      <button id="cad-btn" type="button" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
+      <button id="paste-btn" type="button" title="Send your clipboard text to the remote desktop">Send clipboard</button>
+      <button id="full-btn" type="button">Full screen</button>
+      <span class="spacer"></span>
+      <button id="disconnect-btn" type="button">Disconnect</button>
+    </div>
+    <div id="display" tabindex="0"></div>
+  </section>
+</main>
+<script>__SCRIPT__</script>
+</body>
+</html>

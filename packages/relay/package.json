@@ -1,0 +1,19 @@
+{
+  "name": "@wrhs/relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/relay.ts"
+  },
+  "bin": {
+    "wrhs-relay": "./src/main.ts"
+  },
+  "scripts": {
+    "start": "node src/main.ts"
+  },
+  "dependencies": {
+    "@wrhs/protocol": "0.1.0",
+    "ws": "8.22.0"
+  }
+}

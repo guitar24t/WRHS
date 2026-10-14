@@ -1,0 +1,26 @@
+{
+  "name": "wrhs",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Secure remote desktop over HTTPS with an end-to-end encrypted inner layer that TLS-intercepting proxies cannot read",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "npm run build -w @wrhs/client",
+    "typecheck": "tsc -p .",
+    "test": "node --test --test-timeout=60000 \"packages/*/test/*.test.ts\" \"test/e2e/*.test.ts\"",
+    "test:browser": "node --test --test-timeout=120000 \"test/browser/*.test.ts\"",
+    "relay": "node packages/relay/src/main.ts",
+    "agent": "node packages/agent/src/cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "@types/ws": "8.18.1",
+    "typescript": "5.9.3"
+  }
+}

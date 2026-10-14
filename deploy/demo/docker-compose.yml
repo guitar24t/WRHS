@@ -1,0 +1,32 @@
+# All-in-one local demo. Run ./setup.sh first.
+# In a real deployment the relay runs on a public host and the agent runs in
+# your private network; see deploy/relay and deploy/agent.
+services:
+  relay:
+    build: ../..
+    command: ["node", "packages/relay/src/main.ts"]
+    environment:
+      RELAY_PORT: "8080"
+      RELAY_AGENTS_FILE: /data/agents.json
+      RELAY_HOSTED_CLIENT: /app/packages/client/dist/hosted.html
+    volumes:
+      - ./data/agents.json:/data/agents.json:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  agent:
+    build: ../..
+    command: ["node", "packages/agent/src/cli.ts", "run", "--config", "/data/agent.json"]
+    volumes:
+      - ./data:/data:ro
+    depends_on: [relay, guacd]
+    restart: on-failure
+
+  guacd:
+    image: guacamole/guacd:1.6.0
+
+  # Throwaway RDP target (user ubuntu / password ubuntu). Not for production.
+  desktop:
+    image: scottyhardy/docker-remote-desktop:latest
+    hostname: desktop
+    shm_size: 1g

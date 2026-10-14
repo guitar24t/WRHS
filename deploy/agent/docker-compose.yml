@@ -1,0 +1,32 @@
+# Agent side: run inside the network that can reach your RDP hosts.
+# Needs only outbound HTTPS to the relay; no inbound ports.
+#
+#   docker compose run --rm agent node packages/agent/src/cli.ts init --config /data/agent.json \
+#       --relay https://relay.example.com --name "Home office"
+#   docker compose run --rm agent node packages/agent/src/cli.ts add-target --config /data/agent.json \
+#       --id desk --name "Desk PC" --host 192.168.1.20 --security nla --ignore-cert
+#   docker compose run --rm -it agent node packages/agent/src/cli.ts add-user --config /data/agent.json alice
+#   docker compose run --rm agent node packages/agent/src/cli.ts launcher --config /data/agent.json --out /data/launcher.html
+#   docker compose up -d
+#
+# In agent.json set "guacd": {"host": "guacd", "port": 4822}.
+services:
+  agent:
+    build: ../..
+    command: ["node", "packages/agent/src/cli.ts", "run", "--config", "/data/agent.json"]
+    volumes:
+      - ./data:/data
+    depends_on: [guacd]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # If this network also sits behind an intercepting proxy, the agent works
+    # the same way: trust its CA with NODE_EXTRA_CA_CERTS.
+    # environment:
+    #   NODE_EXTRA_CA_CERTS: /data/corporate-ca.pem
+
+  guacd:
+    image: guacamole/guacd:1.6.0
+    restart: unless-stopped
+    # Not published: only the agent talks to guacd.
