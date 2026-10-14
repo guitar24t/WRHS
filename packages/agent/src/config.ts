@@ -80,6 +80,29 @@ export const DEFAULT_POLICY: AgentConfig['policy'] = {
   maxSessionSeconds: 12 * 3600,
 };
 
+/** Throws if a target definition is unusable. */
+export function validateTarget(t: TargetConfig): void {
+  if (!t.id) throw new Error('target id is required');
+  if (t.protocol !== 'rdp') throw new Error(`target ${t.id}: only protocol "rdp" is supported`);
+  if (!t.hostname) throw new Error(`target ${t.id}: hostname is required`);
+  if (t.port !== undefined && (!Number.isInteger(t.port) || t.port < 1 || t.port > 65535)) {
+    throw new Error(`target ${t.id}: port must be 1-65535`);
+  }
+  const engine = t.engine ?? 'rdp';
+  if (engine !== 'rdp' && engine !== 'guacd') throw new Error(`target ${t.id}: engine must be "rdp" or "guacd"`);
+  if (engine === 'rdp' && t.password) {
+    throw new Error(
+      `target ${t.id}: the built-in RDP engine signs in with the user's own credentials; remove "password" (or use engine "guacd")`,
+    );
+  }
+  if (engine === 'rdp' && t.security && !['any', 'nla', 'tls'].includes(t.security)) {
+    throw new Error(`target ${t.id}: with the built-in RDP engine, security must be "nla" or "tls"`);
+  }
+  if (t.certSha256 !== undefined && !/^([0-9a-fA-F]{2}:?){32}$/.test(t.certSha256)) {
+    throw new Error(`target ${t.id}: certSha256 must be a SHA-256 fingerprint`);
+  }
+}
+
 /** Engine a target uses. */
 export function targetEngine(t: TargetConfig): DesktopEngine {
   return t.engine ?? 'rdp';
@@ -102,21 +125,7 @@ export function loadConfig(path: string): AgentConfig {
   const ids = new Set<string>();
   for (const t of cfg.targets) {
     if (!t.id || ids.has(t.id)) throw new Error(`duplicate or missing target id: ${t.id}`);
-    if (t.protocol !== 'rdp') throw new Error(`target ${t.id}: only protocol "rdp" is supported`);
-    if (!t.hostname) throw new Error(`target ${t.id}: hostname is required`);
-    const engine = t.engine ?? 'rdp';
-    if (engine !== 'rdp' && engine !== 'guacd') throw new Error(`target ${t.id}: engine must be "rdp" or "guacd"`);
-    if (engine === 'rdp' && t.password) {
-      throw new Error(
-        `target ${t.id}: the built-in RDP engine signs in with the user's own credentials; remove "password" (or use engine "guacd")`,
-      );
-    }
-    if (engine === 'rdp' && t.security && !['any', 'nla', 'tls'].includes(t.security)) {
-      throw new Error(`target ${t.id}: with the built-in RDP engine, security must be "nla" or "tls"`);
-    }
-    if (t.certSha256 !== undefined && !/^([0-9a-fA-F]{2}:?){32}$/.test(t.certSha256)) {
-      throw new Error(`target ${t.id}: certSha256 must be a SHA-256 fingerprint`);
-    }
+    validateTarget(t);
     ids.add(t.id);
   }
   for (const u of cfg.users) {
