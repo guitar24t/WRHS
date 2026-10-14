@@ -1,9 +1,21 @@
-// The remote desktop view: Guacamole client wiring, input (mouse, touch,
-// keyboard, on-screen keyboard), cursor, clipboard and the "starting" state.
+// Desktop view for the guacd engine: Guacamole client wiring, input (mouse,
+// touch, keyboard, on-screen keyboard), cursor, clipboard and the
+// "starting" state.
 
 import Guacamole from '../vendor/guacamole-common-js/guacamole-common.js';
 import type { AppChannel, SecureSession } from '@wrhs/protocol';
 import { createEncryptedTunnel } from './tunnel.ts';
+import {
+  isTouchDevice,
+  remoteSize,
+  showSoftKeyboard,
+  watchForFirstPicture,
+  wireSoftKeyboard,
+  type DesktopView,
+  type RemoteCallbacks,
+  type RemoteElements,
+  type SoftKey,
+} from './desktop-common.ts';
 
 export const KEYSYM = {
   ctrl: 0xffe3,
@@ -19,8 +31,7 @@ export const KEYSYM = {
   down: 0xff54,
 } as const;
 
-/** Keys a hardware keyboard can send to the on-screen keyboard field that are not text. */
-const SPECIAL_KEYS: Record<string, number> = {
+const SOFT_KEYSYMS: Record<SoftKey, number> = {
   Backspace: KEYSYM.backspace,
   Enter: KEYSYM.enter,
   Tab: KEYSYM.tab,
@@ -32,27 +43,10 @@ const SPECIAL_KEYS: Record<string, number> = {
   ArrowDown: KEYSYM.down,
 };
 
-export const isTouchDevice = (): boolean =>
-  (typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches) || navigator.maxTouchPoints > 0;
-
-export interface RemoteElements {
-  container: HTMLElement;
-  loading: HTMLElement;
-  loadingText: HTMLElement;
-  softKeyboard: HTMLTextAreaElement;
-}
-
-export interface RemoteCallbacks {
-  /** The Guacamole client reported an error (the session itself may still be fine). */
-  onError(message: string): void;
-  /** The first picture arrived (or we gave up waiting for one). */
-  onReady?(): void;
-}
-
 // One keyboard listener for the page: Guacamole.Keyboard has no way to detach.
 let sharedKeyboard: GuacKeyboard | null = null;
 
-export class RemoteDesktop {
+export class GuacamoleDesktop implements DesktopView {
   readonly #client: GuacClient;
   readonly #session: SecureSession;
   readonly #els: RemoteElements;
@@ -121,7 +115,19 @@ export class RemoteDesktop {
       this.#client.sendKeyEvent(0, keysym);
     };
 
-    this.#wireSoftKeyboard();
+    this.#cleanup.push(
+      wireSoftKeyboard(this.#els.softKeyboard, {
+        type: (text) => {
+          this.#input();
+          this.#keyboard.type(text);
+        },
+        press: (key) => {
+          this.#input();
+          this.#keyboard.press(SOFT_KEYSYMS[key]);
+          this.#keyboard.release(SOFT_KEYSYMS[key]);
+        },
+      }),
+    );
     const focus = () => container.focus();
     container.addEventListener('mousedown', focus);
     this.#cleanup.push(() => container.removeEventListener('mousedown', focus));
@@ -173,10 +179,7 @@ export class RemoteDesktop {
 
   /** Raise the phone/tablet keyboard (must run inside a user gesture). */
   showSoftKeyboard(): void {
-    const ta = this.#els.softKeyboard;
-    ta.value = ' ';
-    ta.focus();
-    ta.setSelectionRange(1, 1);
+    showSoftKeyboard(this.#els.softKeyboard);
   }
 
   focus(): void {
@@ -205,116 +208,20 @@ export class RemoteDesktop {
   }
 
   /**
-   * Phone and tablet keyboards do not produce reliable key events, so text
-   * goes through a hidden field: each insertion is typed into the remote
-   * desktop and the field is reset. A single space stays in the field so
-   * Backspace always has something to delete (and so fires an event).
-   */
-  #wireSoftKeyboard(): void {
-    const ta = this.#els.softKeyboard;
-    const reset = () => {
-      ta.value = ' ';
-      ta.setSelectionRange(1, 1);
-    };
-    const type = (text: string) => {
-      this.#input();
-      this.#keyboard.type(text);
-    };
-    const press = (keysym: number) => {
-      this.#input();
-      this.#keyboard.press(keysym);
-      this.#keyboard.release(keysym);
-    };
-    const onBeforeInput = (e: InputEvent) => {
-      switch (e.inputType) {
-        case 'insertText':
-        case 'insertReplacementText':
-        case 'insertFromPaste':
-          e.preventDefault();
-          if (e.data) type(e.data);
-          break;
-        case 'insertLineBreak':
-        case 'insertParagraph':
-          e.preventDefault();
-          press(KEYSYM.enter);
-          break;
-        case 'deleteContentBackward':
-          e.preventDefault();
-          press(KEYSYM.backspace);
-          break;
-        case 'deleteContentForward':
-          e.preventDefault();
-          press(KEYSYM.del);
-          break;
-        default:
-          // Composition (IME) input cannot be cancelled; handled on compositionend.
-          break;
-      }
-    };
-    const onCompositionEnd = (e: CompositionEvent) => {
-      if (e.data) type(e.data);
-      reset();
-    };
-    const onKeyDown = (e: KeyboardEvent) => {
-      const keysym = SPECIAL_KEYS[e.key];
-      if (keysym === undefined || e.isComposing) return;
-      e.preventDefault();
-      press(keysym);
-    };
-    // Fallback for browsers that skip (or do not let us cancel) beforeinput.
-    const onInput = (e: Event) => {
-      if ((e as InputEvent).isComposing) return;
-      const v = ta.value;
-      if (v === ' ') return;
-      if (v === '') press(KEYSYM.backspace);
-      else type(v.startsWith(' ') ? v.slice(1) : v);
-      reset();
-    };
-    ta.addEventListener('beforeinput', onBeforeInput);
-    ta.addEventListener('compositionend', onCompositionEnd);
-    ta.addEventListener('keydown', onKeyDown);
-    ta.addEventListener('input', onInput);
-    this.#cleanup.push(() => {
-      ta.removeEventListener('beforeinput', onBeforeInput);
-      ta.removeEventListener('compositionend', onCompositionEnd);
-      ta.removeEventListener('keydown', onKeyDown);
-      ta.removeEventListener('input', onInput);
-    });
-  }
-
-  /**
    * Keep the "starting" overlay until something visible is drawn. Signing
    * in to a remote computer can take several seconds of black screen.
    */
   #watchForFirstPicture(): void {
-    const probe = document.createElement('canvas');
-    probe.width = probe.height = 24;
-    const ctx = probe.getContext('2d', { willReadFrequently: true });
-    const started = Date.now();
-    let connectedAt = 0;
-    const tick = () => {
-      if (this.#stopped || this.#ready) return;
-      const now = Date.now();
-      if (this.#state === Guacamole.Client.State.CONNECTED) {
-        connectedAt ||= now;
-        if (now - connectedAt > 20_000 || (ctx && this.#hasVisiblePixels(ctx))) return this.#markReady();
-      }
-      if (now - started > 8000) {
-        this.#els.loadingText.textContent = 'Still starting… signing in to the remote computer can take a little while.';
-      }
-      setTimeout(tick, 300);
-    };
-    setTimeout(tick, 300);
-  }
-
-  #hasVisiblePixels(ctx: CanvasRenderingContext2D): boolean {
-    const src = this.#client.getDisplay().getDefaultLayer().getCanvas();
-    if (!src.width || !src.height) return false;
-    ctx.clearRect(0, 0, 24, 24);
-    ctx.drawImage(src, 0, 0, 24, 24);
-    const px = ctx.getImageData(0, 0, 24, 24).data;
-    for (let i = 0; i < px.length; i += 4) if (px[i]! + px[i + 1]! + px[i + 2]! > 40) return true;
-    return false;
+    this.#cleanup.push(
+      watchForFirstPicture({
+        canvas: () => this.#client.getDisplay().getDefaultLayer().getCanvas(),
+        connected: () => !this.#stopped && this.#state === Guacamole.Client.State.CONNECTED,
+        ready: () => this.#markReady(),
+        slow: () => {
+          this.#els.loadingText.textContent = 'Still starting… signing in to the remote computer can take a little while.';
+        },
+      }),
+    );
   }
 
   #markReady(): void {
@@ -327,14 +234,4 @@ export class RemoteDesktop {
     this.#els.loading.hidden = !on;
     if (text) this.#els.loadingText.textContent = text;
   }
-}
-
-/** Remote screen size for a container, in device pixels. */
-export function remoteSize(el: HTMLElement): { width: number; height: number; dpi: number } {
-  const density = window.devicePixelRatio || 1;
-  return {
-    width: Math.round(el.clientWidth * density),
-    height: Math.round(el.clientHeight * density),
-    dpi: Math.round(96 * density),
-  };
 }

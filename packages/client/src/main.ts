@@ -1,9 +1,9 @@
 // WRHS browser client.
 //
-// This file is bundled, together with the vendored guacamole-common-js, into
-// a single self-contained HTML file. Nothing is loaded from the network
-// except encrypted frames, so a launcher opened from disk cannot be altered
-// by a proxy in transit.
+// This file is bundled, together with the RDP client (IronRDP, WebAssembly)
+// and the vendored guacamole-common-js, into a single self-contained HTML
+// file. Nothing is loaded from the network except encrypted frames, so a
+// launcher opened from disk cannot be altered by a proxy in transit.
 
 import {
   AppChannel,
@@ -17,7 +17,9 @@ import {
   type TargetInfo,
 } from '@wrhs/protocol';
 import { loadDeviceKey } from './device-key.ts';
-import { RemoteDesktop, remoteSize } from './remote.ts';
+import { remoteSize, type DesktopView, type RemoteElements } from './desktop-common.ts';
+import { GuacamoleDesktop } from './guac-view.ts';
+import { RdpDesktop, loadRdpEngine } from './rdp-view.ts';
 import {
   describeAuthError,
   describeClose,
@@ -65,7 +67,7 @@ let devicePersistent = false;
 let conn: ClientConnection | null = null;
 let app: AppChannel | null = null;
 let session: SecureSession | null = null;
-let remote: RemoteDesktop | null = null;
+let remote: DesktopView | null = null;
 let targets: TargetInfo[] = [];
 let pendingTarget: TargetInfo | null = null;
 /** Desktop that ended unexpectedly, offered for one-click reopening. */
@@ -248,7 +250,9 @@ async function connect(): Promise<void> {
   app = new AppChannel(session);
   app.on('control', (m) => {
     // Ignore notices about a desktop that was already closed or replaced.
-    if (m.t === 'closed' && (m.ref === undefined || m.ref === app?.lastOpenRef)) onRemoteEnded();
+    if (m.t !== 'closed' || (m.ref !== undefined && m.ref !== app?.lastOpenRef)) return;
+    if (remote?.remoteClosed) remote.remoteClosed();
+    else onRemoteEnded();
   });
   $('signout-btn').hidden = false;
   $('details-btn').hidden = false;
@@ -382,6 +386,8 @@ async function login(ev: SubmitEvent): Promise<void> {
     totpField.value = '';
     renderTargets();
     showTargets(targets.length ? null : 'No desktops are assigned to your account. Ask your administrator.', 'warn');
+    // Compile the RDP client while the user picks a desktop.
+    if (targets.some((t) => t.engine === 'rdp')) void loadRdpEngine().catch(() => {});
   } catch (err) {
     pw.value = '';
     totpField.value = '';
@@ -446,7 +452,9 @@ function chooseTarget(t: TargetInfo): void {
     $('target-list').querySelector(`button[data-target="${CSS.escape(t.id)}"]`)?.setAttribute('aria-pressed', 'true');
     $('creds-target').textContent = t.name;
     $('rdp-creds').hidden = false;
-    input('rdp-user').focus();
+    input('rdp-user').value = t.username ?? '';
+    input('rdp-domain').value = t.domain ?? '';
+    (t.username ? input('rdp-pass') : input('rdp-user')).focus();
     return;
   }
   void openTarget(t);
@@ -461,13 +469,15 @@ async function openTarget(t: TargetInfo, credentials?: { username?: string; pass
   $('remote-title').textContent = `Remote desktop: ${t.name}`;
   show('remote', $('display'));
   title(`${t.name} · ${agentLabel()}`);
+  let engine: 'rdp' | 'guacd';
   try {
-    await app.open({
+    ({ engine } = await app.open({
       target: t.id,
       ...remoteSize($('display')),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      ...(credentials ? { credentials } : {}),
-    });
+      // The built-in RDP client signs in itself; only guacd needs them.
+      ...(credentials && t.engine !== 'rdp' ? { credentials } : {}),
+    }));
   } catch {
     $('loading-overlay').hidden = true;
     if (session?.closed || closedShown || !desktopActive) return;
@@ -480,26 +490,42 @@ async function openTarget(t: TargetInfo, credentials?: { username?: string; pass
     app.closeDesktop();
     return;
   }
-  remote = new RemoteDesktop(
-    app,
-    session,
-    {
-      container: $('display'),
-      loading: $('loading-overlay'),
-      loadingText: $('loading-text'),
-      softKeyboard: $<HTMLTextAreaElement>('soft-kbd'),
-    },
-    { onError: (msg) => onRemoteEnded(`The remote desktop reported an error: ${msg}`) },
-  );
+  const els: RemoteElements = {
+    container: $('display'),
+    loading: $('loading-overlay'),
+    loadingText: $('loading-text'),
+    softKeyboard: $<HTMLTextAreaElement>('soft-kbd'),
+  };
+  remote =
+    engine === 'rdp'
+      ? new RdpDesktop(
+          app,
+          session,
+          els,
+          { onError: (msg) => onRemoteEnded(msg, 'error') },
+          {
+            username: credentials?.username ?? '',
+            password: credentials?.password ?? '',
+            ...(credentials?.domain ? { domain: credentials.domain } : {}),
+            // For the built-in engine the agent asks for credentials exactly when NLA is on.
+            nla: t.promptCredentials,
+            name: t.name,
+          },
+        )
+      : new GuacamoleDesktop(app, session, els, {
+          onError: (msg) => onRemoteEnded(`The remote desktop reported an error: ${msg}`),
+        });
   remote.start();
 }
 
-/** The agent says the remote desktop connection ended. */
-function onRemoteEnded(text = `The remote desktop session ended.`): void {
+/** The remote desktop connection ended (the agent or the view says so). */
+function onRemoteEnded(text = `The remote desktop session ended.`, tone: Tone = 'warn'): void {
   if (!desktopActive) return;
   desktopActive = false;
   stopRemote();
-  showTargets(text, 'warn');
+  // Tell the agent too, in case only the browser side noticed.
+  app?.closeDesktop();
+  showTargets(text, tone);
 }
 
 function closeDesktop(): void {

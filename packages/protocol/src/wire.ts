@@ -29,6 +29,21 @@ export const MAX_FRAME = 70 * 1024;
 /** Application channels multiplexed inside the encrypted session. */
 export const CHANNEL_CONTROL = 1;
 export const CHANNEL_GUAC = 2;
+/**
+ * Raw RDP for the built-in engine. The browser's first message is an
+ * RDCleanPath request; after the agent's RDCleanPath response the channel
+ * carries the RDP byte stream (the agent terminates the server's TLS).
+ */
+export const CHANNEL_RDP = 3;
+
+/**
+ * How a desktop is drawn in the browser.
+ *   rdp     built-in: the browser runs an RDP client (IronRDP, WebAssembly)
+ *           and the agent only opens the connection to the RDP server.
+ *   guacd   the agent hands the session to Apache Guacamole's guacd and the
+ *           browser renders the Guacamole protocol.
+ */
+export type DesktopEngine = 'rdp' | 'guacd';
 
 export type RelayMessage =
   | { t: 'session'; sid: string }
@@ -99,7 +114,7 @@ export type ControlMessage =
       /** Echoed in open-ok/open-fail/closed so replies can be matched to this request. */
       ref?: number;
     }
-  | { t: 'open-ok'; ref?: number }
+  | { t: 'open-ok'; ref?: number; engine?: DesktopEngine }
   | { t: 'open-fail'; message: string; ref?: number }
   | { t: 'close-desktop' }
   | { t: 'closed'; message: string; ref?: number }
@@ -115,6 +130,11 @@ export interface TargetInfo {
   id: string;
   name: string;
   protocol: string;
-  /** True when the agent will ask the client for RDP credentials. */
+  /** Absent from older agents, which only had the guacd engine. */
+  engine?: DesktopEngine;
+  /** True when the client should ask the user for the remote computer's credentials. */
   promptCredentials: boolean;
+  /** Suggested user name and domain for the credentials prompt. */
+  username?: string;
+  domain?: string;
 }

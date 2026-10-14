@@ -118,3 +118,61 @@ export function formatCountdown(ms: number): string {
   const m = Math.round(s / 60);
   return `${m} minute${m === 1 ? '' : 's'}`;
 }
+
+/** What the browser RDP client (IronRDP) throws: an IronError, or a plain Error. */
+interface RdpErrorLike {
+  kind?: () => number;
+  backtrace?: () => string;
+  rdcleanpathDetails?: () => { wsaErrorCode?: number; tlsAlertCode?: number } | undefined;
+}
+
+const RDP_KIND = { wrongPassword: 1, logonFailure: 2, accessDenied: 3, rdcleanpath: 4, proxyConnect: 5, negotiation: 6 } as const;
+
+/** The built-in RDP client could not connect, or failed later. */
+export function describeRdpError(err: unknown, name: string): string {
+  const e = (err ?? {}) as RdpErrorLike;
+  let kind = -1;
+  let detail = '';
+  try {
+    kind = typeof e.kind === 'function' ? e.kind() : -1;
+    detail = typeof e.backtrace === 'function' ? e.backtrace() : err instanceof Error ? err.message : '';
+  } catch {
+    // The error object is no longer usable.
+  }
+  const wrongCredentials =
+    `${name} did not accept the user name or password. Use the account you sign in to that computer with ` +
+    '(for a Microsoft account: its email address and password, not the PIN).';
+  if (kind === RDP_KIND.wrongPassword || kind === RDP_KIND.logonFailure) return wrongCredentials;
+  if (kind === RDP_KIND.accessDenied) {
+    return `${name} does not let this account connect remotely. It must be an administrator or in the Remote Desktop Users group.`;
+  }
+  if (kind === RDP_KIND.rdcleanpath) {
+    let wsa: number | undefined;
+    try {
+      wsa = e.rdcleanpathDetails?.()?.wsaErrorCode;
+    } catch {
+      wsa = undefined;
+    }
+    if (wsa === 10061) return `Remote Desktop is not accepting connections on ${name}. Check that Remote Desktop is turned on.`;
+    if (wsa === 10060) return `${name} did not answer in time. It may be turned off or asleep.`;
+    if (/certificate .* does not match/.test(detail)) {
+      return `${name} presented an unexpected certificate, so the agent stopped the connection. Ask your administrator to check it.`;
+    }
+    return `The agent could not start a remote desktop on ${name}.`;
+  }
+  if (kind === RDP_KIND.proxyConnect) return 'The encrypted connection was interrupted while the remote desktop was starting.';
+  if (kind === RDP_KIND.negotiation) {
+    return `${name} refused the connection’s security settings (for example, it requires Network Level Authentication). Ask your administrator to check the agent’s settings for this computer.`;
+  }
+  if (/LOGON_DENIED|logon failure|wrong password|0xc000006d|STATUS_LOGON_FAILURE/i.test(detail)) return wrongCredentials;
+  if (/ACCOUNT_RESTRICTION|PASSWORD_EXPIRED|PASSWORD_MUST_CHANGE|0xc0000224|0xc0000071/i.test(detail)) {
+    return `${name} needs the password of this account to be changed. Sign in at that computer once to change it.`;
+  }
+  return `The remote desktop connection to ${name} failed.`;
+}
+
+/** The RDP session ended normally; `reason` is the server's explanation. */
+export function describeRdpEnd(reason: string, name: string): string {
+  const r = reason.trim().replace(/\.$/, '');
+  return r ? `The remote desktop session on ${name} ended: ${r}.` : `The remote desktop session on ${name} ended.`;
+}

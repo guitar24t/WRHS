@@ -2,6 +2,7 @@
 
 import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import type { DesktopEngine } from '@wrhs/protocol';
 
 export interface UserConfig {
   name: string;
@@ -17,13 +18,30 @@ export interface TargetConfig {
   id: string;
   name: string;
   protocol: 'rdp';
+  /**
+   * "rdp" (default): the browser runs the RDP client and the agent only opens
+   * the connection; nothing else to install. "guacd": hand the session to
+   * Apache Guacamole's guacd (Linux), as in earlier versions.
+   */
+  engine?: DesktopEngine;
   hostname: string;
   port?: number;
   domain?: string;
-  /** Stored RDP credentials. If username is absent, the client is asked for credentials. */
+  /**
+   * rdp engine: suggested user name for the sign-in prompt (the user always
+   * types the password). guacd engine: stored credentials; if username is
+   * absent, the client is asked for credentials.
+   */
   username?: string;
+  /** guacd engine only. */
   password?: string;
+  /**
+   * rdp engine: "nla" (default) signs in with Network Level Authentication;
+   * "tls" skips it, so the remote computer shows its own sign-in screen.
+   */
   security?: 'any' | 'nla' | 'nla-ext' | 'tls' | 'rdp' | 'vmconnect';
+  /** rdp engine: SHA-256 fingerprint of the RDP server certificate to require. */
+  certSha256?: string;
   ignoreCert?: boolean;
   clipboard?: 'both' | 'copy' | 'paste' | 'none';
   fileTransfer?: boolean;
@@ -62,6 +80,11 @@ export const DEFAULT_POLICY: AgentConfig['policy'] = {
   maxSessionSeconds: 12 * 3600,
 };
 
+/** Engine a target uses. */
+export function targetEngine(t: TargetConfig): DesktopEngine {
+  return t.engine ?? 'rdp';
+}
+
 export function loadConfig(path: string): AgentConfig {
   const raw = JSON.parse(readFileSync(path, 'utf8')) as Partial<AgentConfig>;
   const cfg: AgentConfig = {
@@ -81,6 +104,19 @@ export function loadConfig(path: string): AgentConfig {
     if (!t.id || ids.has(t.id)) throw new Error(`duplicate or missing target id: ${t.id}`);
     if (t.protocol !== 'rdp') throw new Error(`target ${t.id}: only protocol "rdp" is supported`);
     if (!t.hostname) throw new Error(`target ${t.id}: hostname is required`);
+    const engine = t.engine ?? 'rdp';
+    if (engine !== 'rdp' && engine !== 'guacd') throw new Error(`target ${t.id}: engine must be "rdp" or "guacd"`);
+    if (engine === 'rdp' && t.password) {
+      throw new Error(
+        `target ${t.id}: the built-in RDP engine signs in with the user's own credentials; remove "password" (or use engine "guacd")`,
+      );
+    }
+    if (engine === 'rdp' && t.security && !['any', 'nla', 'tls'].includes(t.security)) {
+      throw new Error(`target ${t.id}: with the built-in RDP engine, security must be "nla" or "tls"`);
+    }
+    if (t.certSha256 !== undefined && !/^([0-9a-fA-F]{2}:?){32}$/.test(t.certSha256)) {
+      throw new Error(`target ${t.id}: certSha256 must be a SHA-256 fingerprint`);
+    }
     ids.add(t.id);
   }
   for (const u of cfg.users) {
