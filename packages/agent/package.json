@@ -1,0 +1,19 @@
+{
+  "name": "@wrhs/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "wrhs-agent": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "node src/cli.ts run"
+  },
+  "dependencies": {
+    "@wrhs/protocol": "0.1.0",
+    "ws": "8.22.0"
+  }
+}

@@ -1,0 +1,23 @@
+# Caddy obtains a public certificate automatically. TLS here is only the
+# outer layer; confidentiality comes from the end-to-end inner layer.
+{$RELAY_DOMAIN} {
+	encode {
+		match {
+			not path /v1/*
+		}
+	}
+	reverse_proxy relay:8080 {
+		flush_interval -1
+		transport http {
+			read_timeout 0
+		}
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+	log {
+		output stdout
+		format json
+	}
+}

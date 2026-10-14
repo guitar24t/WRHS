@@ -1,0 +1,38 @@
+# Public relay: run on any internet-facing host (a small VPS is plenty).
+# It never sees plaintext, so it does not need to be trusted for
+# confidentiality, only for availability.
+#
+#   1. Point DNS for $RELAY_DOMAIN at this host.
+#   2. Put agent registrations in ./agents.json (printed by `wrhs-agent init`).
+#   3. RELAY_DOMAIN=relay.example.com docker compose up -d
+services:
+  relay:
+    build: ../..
+    command: ["node", "packages/relay/src/main.ts"]
+    environment:
+      RELAY_PORT: "8080"
+      RELAY_AGENTS_FILE: /config/agents.json
+      RELAY_TRUST_PROXY: "1"
+      # Uncomment to serve the hosted client at / (passive-inspection protection only):
+      # RELAY_HOSTED_CLIENT: /app/packages/client/dist/hosted.html
+    volumes:
+      - ./agents.json:/config/agents.json:ro
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  caddy:
+    image: caddy:2.10
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?set RELAY_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
