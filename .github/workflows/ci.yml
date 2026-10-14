@@ -76,6 +76,25 @@ jobs:
         env:
           WRHS_PASSWORD: ci-wrhs-password-not-secret
         run: .\dist\windows\install.ps1 -RelayUrl http://127.0.0.1:8080 -User alice -RemoteDesktopUser wrhsrdp -LauncherOut "$env:RUNNER_TEMP\launcher.html"
+      - name: Diagnose the service (only if installing failed)
+        if: failure()
+        shell: powershell
+        run: |
+          Write-Host '--- ACLs'
+          & icacls.exe (Split-Path (Get-Command node.exe).Source)
+          & icacls.exe C:\ProgramData\WRHS\logs
+          & icacls.exe "C:\Program Files\WRHS"
+          Write-Host '--- WinSW as the current user (console mode, 5 s)'
+          $p = Start-Process -FilePath 'C:\Program Files\WRHS\wrhs-agent-service.exe' -ArgumentList 'test' -PassThru -NoNewWindow
+          Start-Sleep -Seconds 5
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          Write-Host '--- Same service as LocalSystem'
+          & sc.exe config WRHSAgent obj= LocalSystem
+          Start-Service WRHSAgent -ErrorAction Continue
+          Start-Sleep -Seconds 5
+          Get-Service WRHSAgent | Format-List Name, Status | Out-String | Write-Host
+          Get-ChildItem C:\ProgramData\WRHS\logs | ForEach-Object { Write-Host "--- $($_.Name)"; Get-Content $_.FullName -Tail 30 }
+          Stop-Service WRHSAgent -ErrorAction SilentlyContinue
       - name: Start a relay for the agent
         shell: powershell
         run: |

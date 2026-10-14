@@ -288,10 +288,15 @@ try {
   (Get-Service -Name $ServiceId).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
 } catch {
   Write-Host 'The service did not start. Details:' -ForegroundColor Yellow
+  $e = $_.Exception
+  while ($e) { Write-Host "    $($e.GetType().Name): $($e.Message)"; $e = $e.InnerException }
   Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceId'" |
     Format-List Name, State, ExitCode, ServiceSpecificExitCode, StartName, PathName | Out-String | Write-Host
-  Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = (Get-Date).AddMinutes(-5) } -MaxEvents 10 -ErrorAction SilentlyContinue |
-    Format-List TimeCreated, Id, Message | Out-String | Write-Host
+  $since = (Get-Date).AddMinutes(-3)
+  foreach ($log in @('System', 'Application')) {
+    Get-WinEvent -FilterHashtable @{ LogName = $log; Level = 1, 2, 3; StartTime = $since } -MaxEvents 10 -ErrorAction SilentlyContinue |
+      Format-List TimeCreated, ProviderName, Id, Message | Out-String | Write-Host
+  }
   Get-ChildItem -Path $LogDir -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "--- $($_.Name)"; Get-Content -Tail 30 $_.FullName }
   throw
 }
