@@ -236,7 +236,7 @@ test('closing a desktop and reopening at once works; a new open replaces the old
     const second = await c.app.open(size);
     // Open again without closing: replaces the second desktop.
     const third = await c.app.open(size);
-    assert.ok(third > second);
+    assert.ok(third.ref > second.ref);
     await waitFor(() => stack.guacd.connections.length === 3, 5000, 'three guacd connections');
     await new Promise((r) => setTimeout(r, 300));
     assert.deepEqual(closedRefs, [], 'replaced or closed desktops are not reported as ended');
@@ -246,7 +246,7 @@ test('closing a desktop and reopening at once works; a new open replaces the old
     // When it ends on the remote side, the notice carries its reference.
     stack.guacd.dropConnections();
     await waitFor(() => closedRefs.length === 1, 5000, 'closed notice');
-    assert.deepEqual(closedRefs, [third]);
+    assert.deepEqual(closedRefs, [third.ref]);
     c.conn.close();
   } finally {
     await stack.close();

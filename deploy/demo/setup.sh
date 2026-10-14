@@ -15,7 +15,8 @@ if [ ! -f data/agent.json ]; then
     const c = JSON.parse(fs.readFileSync("data/agent.json", "utf8"));
     c.guacd = { host: "guacd", port: 4822 };
     fs.writeFileSync("data/agent.json", JSON.stringify(c, null, 2) + "\n");'
-  "${CLI[@]}" add-target --id desktop --name "Demo Linux desktop" --host desktop \
+  # xrdp desktop through guacd (stored demo credentials need the guacd engine).
+  "${CLI[@]}" add-target --id desktop --name "Demo Linux desktop" --host desktop --engine guacd \
     --rdp-user ubuntu --rdp-password ubuntu --ignore-cert
   PASS="${DEMO_PASSWORD:-$(node -e 'console.log(require("crypto").randomBytes(12).toString("base64url"))')}"
   WRHS_PASSWORD="$PASS" "${CLI[@]}" add-user demo

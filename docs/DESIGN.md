@@ -69,27 +69,28 @@ flowchart LR
     subgraph Internet
         R["Relay<br/>(blind forwarder)"]
     end
-    subgraph Home["Your network (trusted)"]
-        A["Agent"]
-        G["guacd<br/>(FreeRDP)"]
-        H["RDP host(s)"]
+    subgraph Home["Your PC / network (trusted)"]
+        A["Agent<br/>(Windows service)"]
+        H["Remote Desktop<br/>(this PC, or other hosts)"]
+        G["guacd (optional)"]
     end
     B -- "HTTPS / WSS (outer TLS, decrypted by proxy)" --> P
     P -- "HTTPS / WSS" --> R
     A -- "outbound HTTPS / WSS" --> R
-    A -- "Guacamole protocol" --> G
-    G -- "RDP (TLS/NLA)" --> H
+    A -- "RDP over TLS (loopback for This PC)" --> H
+    A -. "Guacamole protocol" .-> G
+    G -. "RDP" .-> H
     B -. "Noise XXhfs end-to-end session<br/>(X25519 + ML-KEM-768, ChaCha20-Poly1305)" .-> A
 ```
 
 | Component | Where it runs | Trusted with plaintext? | Role |
 |---|---|---|---|
-| Launcher | Client browser, opened from disk | Yes | UI, Noise initiator, Guacamole renderer |
+| Launcher | Client browser, opened from disk | Yes | UI, Noise initiator, RDP client (IronRDP, WebAssembly), Guacamole renderer |
 | Proxy | Untrusted network | **No** | Sees only the outer layer |
 | Relay | Any public host | **No** | Pairs browser and agent sessions, copies opaque frames |
-| Agent | Your network | Yes | Noise responder, user auth, policy, bridge to guacd |
-| guacd | Next to the agent | Yes | RDP client (FreeRDP); turns the desktop into Guacamole drawing instructions |
-| RDP host | Your network | Yes | The Windows (or xrdp) machine |
+| Agent | The PC to reach, or a machine on its network | Yes | Noise responder, user auth, policy, RDP gateway (RDCleanPath), bridge to guacd |
+| RDP host | The same PC (loopback) or your network | Yes | Windows' own Remote Desktop service (or xrdp) |
+| guacd | Next to the agent (optional) | Yes | Alternative engine: RDP client (FreeRDP) that turns the desktop into Guacamole drawing instructions |
 
 ### Two layers
 
@@ -108,8 +109,9 @@ likely to be attacked or run by someone else (a VPS provider, a
 colleague). If the inner layer ended there, a relay compromise would expose
 every session. With the agent as the endpoint, the relay is a dumb pipe
 like the proxy. The agent dials out, so the private network needs no
-inbound firewall rule. The agent-to-guacd-to-RDP leg stays inside the
-trusted network, and RDP adds its own TLS/NLA on that leg.
+inbound firewall rule. The agent-to-RDP leg stays inside the trusted
+network (on the same PC, it is loopback), and RDP adds its own TLS/NLA on
+that leg.
 
 ## 4. The hard part: trusting the code in the browser
 
@@ -260,19 +262,60 @@ cause plaintext to be sent or skip a check.
 - **Device keys.** Each browser profile keeps a Noise static key in
   IndexedDB. An admin can restrict a user to enrolled devices with
   `wrhs-agent enroll-device`.
-- **RDP credentials.** Either stored per target on the agent, or typed by
-  the user and sent through the tunnel. They never leave the trusted network
-  in any other form.
-- **Authorization.** Each user has a list of targets. Clipboard
-  (`both`/`copy`/`paste`/`none`), file transfer and audio are set per target
-  and enforced by guacd's own parameters, not by client-side code.
+- **RDP credentials.** With the built-in engine the user types them into the
+  launcher, which performs NLA (CredSSP) itself inside the tunnel; the agent
+  never sees them in clear. Stored credentials are deliberately not
+  supported there: they would have to be handed to the browser. With the
+  guacd engine they are stored per target on the agent or typed by the
+  user and sent through the tunnel.
+- **Authorization.** Each user has a list of targets, and the agent connects
+  only to the configured host of the target opened. Clipboard and drive
+  redirection: for guacd targets, set per target and enforced by guacd's
+  own parameters; for built-in targets, enforced by the RDP host's Group
+  Policy (client-side settings would not be a control).
 - **Session limits.** Authentication timeout, idle timeout, and a maximum
   session length (12 h), which also limits how long one set of keys is used.
 
 ## 8. Remote desktop pipeline
 
-WRHS does not implement RDP. It reuses the most widely deployed open-source
-stack for RDP in a browser:
+WRHS does not implement RDP itself. It has two engines; each target picks
+one.
+
+### Built-in (default): IronRDP in the browser, the agent as gateway
+
+This is what serves a Windows PC's own desktop, and it needs nothing but
+the agent:
+
+- The launcher bundles **IronRDP** (Devolutions' Rust RDP stack compiled to
+  WebAssembly, `@devolutions/iron-remote-desktop-rdp`, pinned). It renders
+  into a canvas; WRHS's own view (`packages/client/src/rdp-view.ts`)
+  handles input, clipboard, scaling and the user interface.
+- IronRDP reaches RDP servers through a gateway speaking **RDCleanPath**
+  (the protocol Devolutions Gateway uses). The agent is that gateway
+  (`packages/agent/src/rdp-bridge.ts`), on channel 3 of the encrypted
+  session:
+  1. It opens TCP to the target's RDP server.
+  2. It forwards the browser's X.224 request.
+  3. It does the TLS handshake and returns the server's certificate chain.
+  4. It relays the plaintext RDP stream.
+- **NLA runs in the browser.** CredSSP is bound to the certificate the
+  agent reports, and the remote computer's password stays with the user.
+- At build time, IronRDP's `new WebSocket(gateway)` is replaced by a socket
+  over the encrypted session (`rdp-socket.ts`). Its WebAssembly is embedded
+  gzip-compressed and handed to it directly, so the page's CSP still allows
+  network connections to the relay only.
+
+For "This PC" the agent connects to `127.0.0.1:3389`. Windows treats that
+like any Remote Desktop connection: the user gets their session at the
+browser's size (Display Control resizes it live, with the browser's scale
+factor on high-density screens), and the local console locks. The
+installer turns Remote Desktop on with NLA and blocks it from the network,
+so the only way in is through the agent (see [WINDOWS.md](WINDOWS.md)).
+
+Flow control: the agent pauses reading from the RDP server while too much
+data is unacknowledged at the record layer.
+
+### guacd (optional)
 
 - **guacd** (Apache Guacamole's proxy daemon, built on FreeRDP) connects to
   the RDP host and turns the desktop into the text-based Guacamole protocol.
@@ -280,16 +323,14 @@ stack for RDP in a browser:
   unmodified from the 1.6.0 tag with per-file SHA-256s recorded) renders that
   protocol in the browser.
 
-WRHS's own part is the secure tunnel between the two. The agent performs the
-guacd handshake, then copies bytes. In the browser, a custom
-`Guacamole.Tunnel` (`packages/client/src/tunnel.ts`) sends instructions
-through the encrypted session instead of over a plain WebSocket. Flow
-control comes from Guacamole's `sync` acknowledgements plus record-layer
-backpressure: the agent stops reading from guacd when too much data is
-unacknowledged.
-
-Possible future options: IronRDP (Rust/WASM) to drop guacd, and SSH/VNC
-targets, which guacd already supports.
+The agent performs the guacd handshake, then copies bytes. In the browser, a
+custom `Guacamole.Tunnel` (`packages/client/src/tunnel.ts`) sends
+instructions through the encrypted session instead of over a plain
+WebSocket. Flow control comes from Guacamole's `sync` acknowledgements plus
+record-layer backpressure. guacd runs on Linux; it is useful for hosts that
+IronRDP renders poorly (IronRDP 0.7.0 draws xrdp's bitmap updates with a
+stride error) and for features guacd has, such as audio and drive
+redirection.
 
 ## 9. Relay
 
@@ -348,4 +389,7 @@ credentials, internal hostnames, or which desktop you opened.
 - `HTTPS_PROXY` support for agents that sit behind a proxy themselves.
   Today, trusting a corporate CA works with `NODE_EXTRA_CA_CERTS` when the
   proxy is transparent.
+- A single-executable Windows agent (Node SEA), signed, so the PC needs no
+  separate Node.js installation.
+- Audio and drive redirection for the built-in engine.
 - An independent security review of the protocol and implementation.

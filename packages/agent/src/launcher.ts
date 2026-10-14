@@ -11,7 +11,14 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { encodeKey, fingerprint } from '@wrhs/protocol';
 
-export const DEFAULT_TEMPLATE = fileURLToPath(new URL('../../client/dist/launcher.template.html', import.meta.url));
+/**
+ * The template next to this file (single-file agent builds ship it there),
+ * else the client build in the source tree.
+ */
+export const DEFAULT_TEMPLATE = [
+  fileURLToPath(new URL('./launcher.template.html', import.meta.url)),
+  fileURLToPath(new URL('../../client/dist/launcher.template.html', import.meta.url)),
+].find((p) => existsSync(p)) ?? fileURLToPath(new URL('../../client/dist/launcher.template.html', import.meta.url));
 
 export interface LauncherOptions {
   relayUrl: string;

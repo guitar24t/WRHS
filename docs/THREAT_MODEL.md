@@ -13,10 +13,15 @@
 ## Trust boundaries
 
 ```
- [browser + launcher] ==outer TLS==> [proxy] ==TLS==> [relay] <==TLS== [agent] -- [guacd] -- [RDP host]
-  trusted                             untrusted        untrusted         trusted (your network)
-  \___________________________ Noise session (end to end) ____________________/
+ [browser + launcher] ==outer TLS==> [proxy] ==TLS==> [relay] <==TLS== [agent] --RDP/TLS--> [RDP host]
+  trusted                             untrusted        untrusted         trusted (your network;
+  \___________________________ Noise session (end to end) ____________________/   loopback for "This PC")
 ```
+
+With the built-in engine, the RDP client runs in the launcher and the agent
+terminates the RDP server's TLS: the RDP stream between them travels inside
+the Noise session. With the guacd engine, guacd sits between the agent and
+the RDP host instead.
 
 The launcher file is trusted *if it was obtained over a trusted channel*.
 The hosted page is not, because it arrives through the proxy (see
@@ -54,7 +59,10 @@ The hosted page is not, because it arrives through the proxy (see
 | 14 | Downgrade the cipher or protocol | A2 | No negotiation: one fixed protocol name, version in the prologue and hellos. | Design |
 | 15 | Use a stolen launcher | A6 | The launcher contains only *public* data (relay URL, agent public key). Logging in still needs password + TOTP (and an enrolled device key if configured). | Design |
 | 16 | Exploit the agent from the internet | A4 | The agent has no listening ports. Before the handshake completes it parses only Noise messages. After that, it parses only authenticated JSON, with length checks on credentials and message sizes capped by the record layer. Unauthenticated sessions time out (30 s handshake, 120 s login). | Code review |
-| 17 | Abuse a session to move laterally | Authenticated user | Per-user target lists. Clipboard and file transfer policy enforced in guacd. Idle and maximum session timeouts. Audit log of logins and targets. | `agent.test.ts` |
+| 17 | Abuse a session to move laterally | Authenticated user | Per-user target lists. The agent connects only to configured targets and ignores the destination the browser's RDP client names. Clipboard and file transfer policy: enforced by guacd for guacd targets, and by the RDP host's own Group Policy for built-in targets. Idle and maximum session timeouts. Audit log of logins and targets. | `agent.test.ts`, `rdp-engine.test.ts` |
+| 18 | Reach the PC's Remote Desktop directly, around WRHS | Network attacker | The Windows installer blocks the RDP port from the network; the agent connects over loopback. NLA is required. | `install.ps1`, Windows CI job |
+| 19 | Pose as an RDP host between the agent and a LAN target, to collect NTLM responses | Attacker on the agent's LAN | "This PC" uses loopback. For other hosts, pin the server certificate (`certSha256`); CredSSP in the browser is also bound to the certificate the agent reports, so a substitute server cannot relay the sign-in. | `rdp.test.ts` "pinned certificate" |
+| 20 | Make the browser's RDP client connect elsewhere | A2, A3 | The client's WebSocket is replaced at build time by a socket over the Noise session, which accepts only addresses handed out by the client itself; the CSP allows no other connections. | `rdp.test.ts` (browser) |
 
 ## Residual risks and limitations
 
@@ -76,8 +84,18 @@ The hosted page is not, because it arrives through the proxy (see
   factor (password + TOTP are still required); moving to non-extractable
   WebCrypto keys is on the roadmap.
 - **Browser and dependency bugs.** The client relies on the browser's
-  sandbox and on the noble and guacamole-common-js code it bundles. All
-  dependencies are pinned to exact versions.
+  sandbox and on the code it bundles: noble, guacamole-common-js, and
+  IronRDP (WebAssembly). Running WebAssembly needs `'wasm-unsafe-eval'` in
+  the CSP; it allows compiling only the module the page itself provides,
+  not JavaScript `eval`. All dependencies are pinned to exact versions.
+- **RDP credentials in the browser.** With the built-in engine the user
+  types the remote computer's password into the launcher, which runs NLA
+  itself. It is protected like the WRHS password (never on the wire outside
+  the Noise session, and inside RDP's own CredSSP), but a compromised
+  client sees it (A7).
+- **The agent's privileges.** On Windows the agent runs as LocalService and
+  can read its own configuration, which holds password hashes, TOTP secrets
+  and the identity key. Administrators of the PC can read it too.
 - **No independent audit yet.** The protocol uses standard constructions
   (Noise, ML-KEM, ChaCha20-Poly1305), but this implementation has not been
   reviewed by a third party.

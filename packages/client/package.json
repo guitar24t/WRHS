@@ -10,6 +10,7 @@
     "@wrhs/protocol": "0.1.0"
   },
   "devDependencies": {
+    "@devolutions/iron-remote-desktop-rdp": "0.7.0",
     "esbuild": "0.28.2"
   }
 }

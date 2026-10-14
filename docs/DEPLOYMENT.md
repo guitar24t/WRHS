@@ -4,8 +4,10 @@ A deployment has three parts:
 
 1. **Relay**: a public HTTPS endpoint, for example a small VPS. It is
    untrusted for confidentiality.
-2. **Agent + guacd**: inside the network that can reach your RDP hosts. Needs
-   only outbound HTTPS.
+2. **Agent**: on the Windows PC whose desktop you want (see
+   [WINDOWS.md](WINDOWS.md); this is the usual setup), or on a machine in
+   the network that can reach your RDP hosts. Needs only outbound HTTPS.
+   guacd is optional (see §2).
 3. **Launcher**: a personalized HTML file that each user keeps on their
    device.
 
@@ -54,7 +56,12 @@ settings, all environment variables:
 The relay logs JSON lines with metadata only: session open/close, agent
 online/offline, byte counts.
 
-## 2. Agent and guacd
+## 2. Agent
+
+**To serve a Windows PC's own desktop**, install the agent on that PC with
+the Windows installer: [WINDOWS.md](WINDOWS.md). The rest of this section
+covers an agent on a separate Linux machine that opens other computers on
+its network.
 
 On a machine in your private network (Linux with Docker; the agent itself
 also runs anywhere Node.js 22.18+ runs):
@@ -75,13 +82,14 @@ relay's `agents.json`:
 { "5c7f612b9b0803b5c3a6765e1bfe0cf2": "896e805b...f8f" }
 ```
 
-Copy that line to the relay host and restart the relay. Then edit
-`data/agent.json` and set `"guacd": {"host": "guacd", "port": 4822}`.
+Copy that line to the relay host and restart the relay. If you will use
+guacd targets, edit `data/agent.json` and set
+`"guacd": {"host": "guacd", "port": 4822}`.
 
 Add desktops and users:
 
 ```bash
-$CLI add-target --id desk --name "Desk PC" --host 192.168.1.20 --security nla --ignore-cert
+$CLI add-target --id desk --name "Desk PC" --host 192.168.1.20 --rdp-user alice
 docker compose run --rm -it agent node packages/agent/src/cli.ts --config /data/agent.json add-user alice
 docker compose up -d
 ```
@@ -91,12 +99,17 @@ docker compose up -d
 
 Notes on targets:
 
-- Leave out `--rdp-user` to make users type Windows credentials at connect
-  time. They are sent through the tunnel. Or store credentials on the agent
-  with `--rdp-user/--rdp-password/--domain`.
-- `--ignore-cert` is common for internal hosts with self-signed RDP
-  certificates. This leg is inside your network.
-- Per-target options in `agent.json`:
+- **Built-in engine** (default, `"engine": "rdp"`): the browser runs the RDP
+  client, and users sign in with their own Windows credentials (NLA runs in
+  the browser). `--rdp-user` and `--domain` only pre-fill the prompt.
+  `--security tls` turns NLA off, so the computer shows its own sign-in
+  screen. Pin the host's certificate with `--cert-sha256` (the agent logs
+  each host's fingerprint in `rdp-connected`), so nothing on the LAN can
+  pose as it.
+- **guacd engine** (`--engine guacd`): guacd connects and renders. It can
+  use stored credentials (`--rdp-user/--rdp-password/--domain`) or ask the
+  user. `--ignore-cert` is common for internal hosts with self-signed RDP
+  certificates. Per-target options in `agent.json`:
   - `clipboard`: `both`, `copy`, `paste` or `none`;
   - `fileTransfer`: `true`/`false`;
   - `audio`: `true`/`false`;
@@ -118,7 +131,8 @@ Policy (`policy` in `agent.json`, defaults shown):
 
 The agent logs JSON audit events: `handshake-ok` with the device
 fingerprint, `login-ok`/`login-fail`, `target-open`/`target-closed`,
-`integrity-failure`, `session-end`.
+`target-fail`, `rdp-connected` (with the RDP host's certificate
+fingerprint), `integrity-failure`, `session-end`.
 
 ## 3. Launchers
 
@@ -157,7 +171,9 @@ $CLI enroll-device alice <device-key-base64url>
 - [ ] The relay uses a valid public certificate (Caddy does this) and runs
       with `RELAY_AGENTS_FILE`, never `RELAY_OPEN_REGISTRATION`.
 - [ ] `agent.key.json` and `agent.json` are mode 0600 and backed up.
-- [ ] guacd is not reachable from anywhere except the agent.
+- [ ] guacd (if used) is not reachable from anywhere except the agent.
+- [ ] Remote Desktop on the agent's own PC is blocked from the network
+      (the Windows installer does this), and LAN targets pin `certSha256`.
 - [ ] RDP hosts use NLA. Users have strong passwords and TOTP.
 - [ ] Clipboard and file transfer are only enabled where needed.
 - [ ] Launchers are distributed over trusted channels. The hosted client is

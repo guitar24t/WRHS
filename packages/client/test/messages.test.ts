@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AuthError, IntegrityError, PinMismatchError, RelayError } from '@wrhs/protocol';
-import { describeAuthError, describeClose, describeConnectError, describeRelayUrlError, formatCountdown } from '../src/messages.ts';
+import {
+  describeAuthError,
+  describeClose,
+  describeConnectError,
+  describeRdpEnd,
+  describeRdpError,
+  describeRelayUrlError,
+  formatCountdown,
+} from '../src/messages.ts';
 
 test('connect errors are explained in plain language', () => {
   const pin = describeConnectError(new PinMismatchError(), 'relay.example.com');
@@ -38,4 +46,23 @@ test('relay address errors and countdowns', () => {
   assert.equal(formatCountdown(1000), '1 second');
   assert.equal(formatCountdown(45_500), '46 seconds');
   assert.equal(formatCountdown(5 * 60_000), '5 minutes');
+});
+
+test('built-in RDP failures name the computer and say what to check', () => {
+  const ironError = (kind: number, backtrace = '', wsaErrorCode?: number) => ({
+    kind: () => kind,
+    backtrace: () => backtrace,
+    rdcleanpathDetails: () => (wsaErrorCode === undefined ? undefined : { wsaErrorCode }),
+  });
+  assert.match(describeRdpError(ironError(1), 'This PC'), /This PC did not accept the user name or password/);
+  assert.match(describeRdpError(ironError(0, 'CredSSP: SEC_E_LOGON_DENIED'), 'This PC'), /did not accept the user name or password/);
+  assert.match(describeRdpError(ironError(3), 'This PC'), /Remote Desktop Users group/);
+  assert.match(describeRdpError(ironError(4, '', 10061), 'This PC'), /Remote Desktop is not accepting connections on This PC/);
+  assert.match(describeRdpError(ironError(4, '', 10060), 'This PC'), /did not answer in time/);
+  assert.match(describeRdpError(ironError(6), 'This PC'), /security settings/);
+  assert.match(describeRdpError(ironError(0, 'something else'), 'This PC'), /connection to This PC failed/);
+  assert.match(describeRdpError(new Error('boom'), 'This PC'), /connection to This PC failed/);
+  assert.match(describeRdpError(undefined, 'This PC'), /connection to This PC failed/);
+  assert.equal(describeRdpEnd('server shut down.', 'This PC'), 'The remote desktop session on This PC ended: server shut down.');
+  assert.equal(describeRdpEnd('', 'This PC'), 'The remote desktop session on This PC ended.');
 });

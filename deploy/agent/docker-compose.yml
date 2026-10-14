@@ -4,12 +4,15 @@
 #   docker compose run --rm agent node packages/agent/src/cli.ts init --config /data/agent.json \
 #       --relay https://relay.example.com --name "Home office"
 #   docker compose run --rm agent node packages/agent/src/cli.ts add-target --config /data/agent.json \
-#       --id desk --name "Desk PC" --host 192.168.1.20 --security nla --ignore-cert
+#       --id desk --name "Desk PC" --host 192.168.1.20
+#     (built-in engine; for a guacd target add: --engine guacd --ignore-cert)
 #   docker compose run --rm -it agent node packages/agent/src/cli.ts add-user --config /data/agent.json alice
 #   docker compose run --rm agent node packages/agent/src/cli.ts launcher --config /data/agent.json --out /data/launcher.html
 #   docker compose up -d
 #
-# In agent.json set "guacd": {"host": "guacd", "port": 4822}.
+# For guacd targets, set "guacd": {"host": "guacd", "port": 4822} in agent.json.
+# (To serve a Windows PC's own desktop, install the agent on that PC instead:
+# see docs/WINDOWS.md.)
 services:
   agent:
     build: ../..

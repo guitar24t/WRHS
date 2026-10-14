@@ -6,3 +6,5 @@ export * from './guacd.ts';
 export * from './relay-link.ts';
 export * from './client-session.ts';
 export * from './launcher.ts';
+export * from './rdcleanpath.ts';
+export * from './rdp-bridge.ts';

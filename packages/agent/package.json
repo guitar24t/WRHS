@@ -10,10 +10,14 @@
     "wrhs-agent": "./src/cli.ts"
   },
   "scripts": {
-    "start": "node src/cli.ts run"
+    "start": "node src/cli.ts run",
+    "build": "node build.mjs"
   },
   "dependencies": {
     "@wrhs/protocol": "0.1.0",
     "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

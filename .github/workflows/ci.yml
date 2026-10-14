@@ -35,3 +35,93 @@ jobs:
       - run: npm install --no-save playwright@1.56.1
       - run: npx playwright install --with-deps chromium
       - run: npm run test:browser
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+  # Installs the agent as a Windows service with deploy/windows/install.ps1,
+  # then connects from Chromium through a relay to this runner's own Remote
+  # Desktop, signing in with a Windows account.
+  windows-rdp:
+    name: windows (real Remote Desktop)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run package:windows
+      - name: Create a Windows account to sign in with
+        shell: powershell
+        run: |
+          $pw = 'Wr1!' + [guid]::NewGuid().ToString('N').Substring(0, 20)
+          Write-Host "::add-mask::$pw"
+          New-LocalUser -Name wrhsrdp -Password (ConvertTo-SecureString $pw -AsPlainText -Force) -PasswordNeverExpires | Out-Null
+          "RDP_PASS=$pw" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - name: Install the agent service
+        shell: powershell
+        env:
+          WRHS_PASSWORD: ci-wrhs-password-not-secret
+        run: .\dist\windows\install.ps1 -RelayUrl http://127.0.0.1:8080 -User alice -RemoteDesktopUser wrhsrdp -LauncherOut "$env:RUNNER_TEMP\launcher.html"
+      - name: Diagnose the service (only if installing failed)
+        if: failure()
+        shell: powershell
+        run: |
+          Write-Host '--- ACLs'
+          & icacls.exe (Split-Path (Get-Command node.exe).Source)
+          & icacls.exe C:\ProgramData\WRHS\logs
+          & icacls.exe "C:\Program Files\WRHS"
+          Write-Host '--- WinSW as the current user (console mode, 5 s)'
+          $p = Start-Process -FilePath 'C:\Program Files\WRHS\wrhs-agent-service.exe' -ArgumentList 'test' -PassThru -NoNewWindow
+          Start-Sleep -Seconds 5
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          Write-Host '--- Same service as LocalSystem'
+          & sc.exe config WRHSAgent obj= LocalSystem
+          Start-Service WRHSAgent -ErrorAction Continue
+          Start-Sleep -Seconds 5
+          Get-Service WRHSAgent | Format-List Name, Status | Out-String | Write-Host
+          Get-ChildItem C:\ProgramData\WRHS\logs | ForEach-Object { Write-Host "--- $($_.Name)"; Get-Content $_.FullName -Tail 30 }
+          Stop-Service WRHSAgent -ErrorAction SilentlyContinue
+      - run: npm install --no-save playwright@1.56.1
+      - run: npx playwright install chromium
+      - name: Open This PC from Chromium through a relay
+        env:
+          WRHS_LAUNCHER: ${{ runner.temp }}\launcher.html
+          WRHS_CONFIG: C:\ProgramData\WRHS\agent.json
+          WRHS_USER: alice
+          WRHS_PASSWORD: ci-wrhs-password-not-secret
+          RDP_USER: wrhsrdp
+          SCREENSHOT_DIR: ${{ runner.temp }}
+        run: node test/windows/rdp-integration.ts
+      - name: Collect logs
+        if: always()
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\logs" | Out-Null
+          Copy-Item -ErrorAction SilentlyContinue C:\ProgramData\WRHS\logs\* "$env:RUNNER_TEMP\logs"
+          Copy-Item -ErrorAction SilentlyContinue "$env:RUNNER_TEMP\*.png" "$env:RUNNER_TEMP\logs"
+          Get-ChildItem "$env:RUNNER_TEMP\logs" | ForEach-Object { Write-Host "--- $($_.Name)"; if ($_.Extension -eq '.log') { Get-Content $_.FullName -Tail 40 } }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-rdp
+          path: ${{ runner.temp }}/logs
+      - name: Uninstall the agent service
+        shell: powershell
+        run: |
+          .\dist\windows\uninstall.ps1 -RemoveData
+          if (Get-Service -Name WRHSAgent -ErrorAction SilentlyContinue) { throw 'The service is still installed.' }
+          if (Get-NetFirewallRule -Name 'WRHS-*' -ErrorAction SilentlyContinue) { throw 'Firewall rules are left behind.' }

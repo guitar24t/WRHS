@@ -11,12 +11,13 @@
     "node": ">=22.18"
   },
   "scripts": {
-    "build": "npm run build -w @wrhs/client",
+    "build": "npm run build -w @wrhs/client && npm run build -w @wrhs/agent",
     "typecheck": "tsc -p .",
     "test": "node --test --test-timeout=60000 \"packages/*/test/*.test.ts\" \"test/e2e/*.test.ts\"",
     "test:browser": "node --test --test-timeout=120000 \"test/browser/*.test.ts\"",
     "relay": "node packages/relay/src/main.ts",
-    "agent": "node packages/agent/src/cli.ts"
+    "agent": "node packages/agent/src/cli.ts",
+    "package:windows": "npm run build && node deploy/windows/package.mjs"
   },
   "devDependencies": {
     "@types/node": "22.18.0",
