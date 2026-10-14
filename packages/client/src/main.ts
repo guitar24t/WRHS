@@ -5,24 +5,29 @@
 // except encrypted frames, so a launcher opened from disk cannot be altered
 // by a proxy in transit.
 
-import Guacamole from '../vendor/guacamole-common-js/guacamole-common.js';
 import {
   AppChannel,
-  AuthError,
   ClientConnection,
-  IntegrityError,
-  PinMismatchError,
-  RelayError,
   decodeKey,
   fingerprint,
   type ConnectionState,
+  type KeyPair,
   type SecureSession,
   type SessionOptions,
   type TargetInfo,
-  type KeyPair,
 } from '@wrhs/protocol';
-import { createEncryptedTunnel } from './tunnel.ts';
 import { loadDeviceKey } from './device-key.ts';
+import { RemoteDesktop, remoteSize } from './remote.ts';
+import {
+  describeAuthError,
+  describeClose,
+  describeConnectError,
+  describeKeyError,
+  describeRelayUrlError,
+  formatCountdown,
+  type Notice,
+  type Tone,
+} from './messages.ts';
 
 interface LauncherConfig {
   relayUrl?: string;
@@ -31,7 +36,7 @@ interface LauncherConfig {
   hosted?: boolean;
 }
 
-const SOFTWARE = 'wrhs-web/0.1.0';
+const SOFTWARE = 'wrhs-web/0.2.0';
 
 const CLIENT_SESSION_OPTIONS: SessionOptions = {
   // While typing, send on a fixed 20 ms grid with padded chaff so the proxy
@@ -39,7 +44,11 @@ const CLIENT_SESSION_OPTIONS: SessionOptions = {
   cadence: { intervalMs: 20, holdMs: 1500, minPlaintext: 256, followPeer: false },
 };
 
+const IDLE_WARNING_MS = 60_000;
+const MAX_SESSION_WARNING_MS = 5 * 60_000;
+
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
+const input = (id: string) => $<HTMLInputElement>(id);
 
 const config: LauncherConfig = (() => {
   try {
@@ -49,30 +58,59 @@ const config: LauncherConfig = (() => {
   }
 })();
 
+// ------------------------------------------------------------------ state
+
 let deviceKey: KeyPair | null = null;
+let devicePersistent = false;
 let conn: ClientConnection | null = null;
 let app: AppChannel | null = null;
 let session: SecureSession | null = null;
-let guac: GuacClient | null = null;
+let remote: RemoteDesktop | null = null;
+let targets: TargetInfo[] = [];
 let pendingTarget: TargetInfo | null = null;
-let agentName = '';
+/** Desktop that ended unexpectedly, offered for one-click reopening. */
+let reopenTarget: TargetInfo | null = null;
+/** True while a desktop is open (or opening) from the user's point of view. */
+let desktopActive = false;
+let closedShown = false;
+let relayHost = '';
+let connectedAt = 0;
+let lastRemoteInput = 0;
+let sessionTimer: ReturnType<typeof setInterval> | null = null;
 
-const views = ['view-connect', 'view-login', 'view-targets', 'view-closed', 'remote'] as const;
-function show(view: (typeof views)[number]): void {
-  for (const v of views) $(v).hidden = v !== view;
+// ------------------------------------------------------------------ helpers
+
+const VIEWS = ['view-connect', 'view-login', 'view-targets', 'view-closed', 'remote'] as const;
+type View = (typeof VIEWS)[number];
+let currentView: View = 'view-connect';
+
+function show(view: View, focus?: HTMLElement | null): void {
+  currentView = view;
+  for (const v of VIEWS) $(v).hidden = v !== view;
+  const target = focus ?? $(view).querySelector<HTMLElement>('h1');
+  target?.focus();
 }
 
-function message(id: string, text: string | null, kind: 'error' | 'warn' | '' = 'error'): void {
+function message(id: string, text: string | null, tone: Tone = 'error'): void {
   const el = $(id);
-  el.hidden = !text;
+  el.className = `msg ${tone}`;
   el.textContent = text ?? '';
-  el.className = `msg ${kind}`;
 }
 
-function security(kind: 'ok' | 'warn' | 'bad', text: string): void {
-  const badge = $('security');
-  badge.className = `badge ${kind}`;
-  $('security-text').textContent = text;
+function badge(kind: 'ok' | 'warn' | 'bad', short: string, long = ''): void {
+  $('security').className = `badge ${kind}`;
+  const t = $('security-text');
+  t.replaceChildren(document.createTextNode(short));
+  if (long) {
+    const span = document.createElement('span');
+    span.className = 'long';
+    span.textContent = long;
+    t.append(span);
+  }
+}
+
+function title(state: string): void {
+  document.title = `${state} · WRHS`;
 }
 
 function storage(): Storage | null {
@@ -83,10 +121,26 @@ function storage(): Storage | null {
   }
 }
 
-// ------------------------------------------------------------------ setup
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+function toast(text: string): void {
+  const el = $('toast');
+  el.textContent = text;
+  el.hidden = false;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.hidden = true), 4000);
+}
+
+function agentLabel(): string {
+  return conn?.agentHello?.name || config.name || 'your agent';
+}
+
+// ------------------------------------------------------------------ connect view
 
 function initConnectView(): void {
   if (config.hosted) $('hosted-banner').hidden = false;
+  resetHeader();
+  badge('warn', 'Not connected');
+  title(config.name ?? 'Connect');
   const keys = config.agentKeys ?? [];
   if (config.relayUrl && keys.length > 0) {
     $('profile').hidden = false;
@@ -95,361 +149,566 @@ function initConnectView(): void {
     try {
       $('profile-fp').textContent = fingerprint(decodeKey(keys[0]!));
     } catch {
-      $('profile-fp').textContent = 'invalid key in launcher';
+      $('profile-fp').textContent = 'invalid key in this launcher';
     }
+    show('view-connect', $('connect-btn'));
   } else {
     $('manual').hidden = false;
     const s = storage();
-    $<HTMLInputElement>('relay-url').value = s?.getItem('wrhs.relay') ?? (config.hosted ? location.origin : '');
-    $<HTMLInputElement>('agent-key').value = s?.getItem('wrhs.agentKey') ?? '';
+    if (!input('relay-url').value) input('relay-url').value = s?.getItem('wrhs.relay') ?? (config.hosted ? location.origin : '');
+    if (!input('agent-key').value) input('agent-key').value = s?.getItem('wrhs.agentKey') ?? '';
+    previewKeyFingerprint();
+    show('view-connect', input('relay-url').value ? $('connect-btn') : input('relay-url'));
   }
-  show('view-connect');
 }
 
-function resolveTarget(): { relayUrl: string; keys: Uint8Array[] } {
+/** Show the fingerprint of a pasted key so it can be checked against the admin's copy. */
+function previewKeyFingerprint(): void {
+  const raw = input('agent-key').value.trim();
+  const hint = $('agent-key-fp');
+  if (!raw) {
+    hint.textContent = '';
+    return;
+  }
+  try {
+    hint.textContent = `Key fingerprint ${fingerprint(decodeKey(raw))}. Check it matches the one your administrator gave you.`;
+  } catch {
+    hint.textContent = 'Not a complete agent key yet.';
+  }
+}
+
+function invalid(field: HTMLInputElement, text: string): null {
+  field.setAttribute('aria-invalid', 'true');
+  message('connect-msg', text);
+  field.focus();
+  return null;
+}
+
+function resolveTarget(): { relayUrl: string; keys: Uint8Array[] } | null {
   if (config.relayUrl && config.agentKeys?.length) {
     return { relayUrl: config.relayUrl, keys: config.agentKeys.map(decodeKey) };
   }
-  const relayUrl = $<HTMLInputElement>('relay-url').value.trim();
-  const key = $<HTMLInputElement>('agent-key').value.trim();
-  const u = new URL(relayUrl);
-  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname))) {
-    throw new Error('The relay URL must use https://');
+  const urlField = input('relay-url');
+  const keyField = input('agent-key');
+  urlField.removeAttribute('aria-invalid');
+  keyField.removeAttribute('aria-invalid');
+  const relayUrl = urlField.value.trim();
+  let u: URL;
+  try {
+    u = new URL(relayUrl);
+  } catch {
+    return invalid(urlField, describeRelayUrlError(relayUrl));
   }
-  const keys = [decodeKey(key)];
+  const local = ['localhost', '127.0.0.1'].includes(u.hostname);
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && local)) return invalid(urlField, describeRelayUrlError(relayUrl));
+  let key: Uint8Array;
+  try {
+    key = decodeKey(keyField.value);
+  } catch {
+    return invalid(keyField, describeKeyError());
+  }
   storage()?.setItem('wrhs.relay', relayUrl);
-  storage()?.setItem('wrhs.agentKey', key);
-  return { relayUrl, keys };
+  storage()?.setItem('wrhs.agentKey', keyField.value.trim());
+  return { relayUrl, keys: [key] };
 }
-
-// ------------------------------------------------------------------ connect
 
 async function connect(): Promise<void> {
   message('connect-msg', null);
-  let target;
-  try {
-    target = resolveTarget();
-  } catch (err) {
-    return message('connect-msg', (err as Error).message);
-  }
+  const target = resolveTarget();
+  if (!target) return;
+  relayHost = new URL(target.relayUrl).host;
   const btn = $<HTMLButtonElement>('connect-btn');
   btn.disabled = true;
-  security('warn', 'Connecting…');
-  if (!deviceKey) {
-    const d = await loadDeviceKey();
-    deviceKey = d.key;
-    showDevice(d.persistent);
-  }
+  btn.textContent = 'Connecting…';
+  badge('warn', 'Connecting…');
+  title('Connecting…');
+  closedShown = false;
+  if (!deviceKey) await ensureDeviceKey();
   conn = new ClientConnection({
     relayUrl: target.relayUrl,
     agentPublicKeys: target.keys,
-    deviceKey,
+    deviceKey: deviceKey!,
     software: SOFTWARE,
     session: CLIENT_SESSION_OPTIONS,
   });
   conn.on('state', onConnectionState);
-  conn.on('transport', () => updateDetails());
+  conn.on('transport', () => refreshDetails());
   try {
     session = await conn.open();
   } catch (err) {
     btn.disabled = false;
+    btn.textContent = 'Connect';
     return failConnect(err as Error);
   }
   btn.disabled = false;
-  agentName = conn.agentHello?.name ?? 'agent';
-  updateDetails();
-  session.on('rtt', () => updateDetails());
-  session.on('close', (info) => onSessionClosed(info.reason, info.error));
+  btn.textContent = 'Connect';
+  connectedAt = lastRemoteInput = Date.now();
+  session.on('rtt', () => refreshDetails());
+  session.on('close', (info) => onSessionClosed(info.reason, info.error, false));
   app = new AppChannel(session);
   app.on('control', (m) => {
-    if (m.t === 'closed') {
-      stopRemote();
-      show('view-targets');
-      message('targets-msg', m.message, 'warn');
-    }
+    // Ignore notices about a desktop that was already closed or replaced.
+    if (m.t === 'closed' && (m.ref === undefined || m.ref === app?.lastOpenRef)) onRemoteEnded();
   });
-  const methods = await app.authMethods();
-  $('totp-row').hidden = !methods.includes('password+totp');
-  show('view-login');
-  $('user').focus();
+  $('signout-btn').hidden = false;
+  $('details-btn').hidden = false;
+  refreshDetails();
+  let methods: string[];
+  try {
+    methods = await app.authMethods();
+  } catch {
+    return; // session closed; onSessionClosed shows why
+  }
+  const needsTotp = methods.includes('password+totp');
+  $('totp-row').hidden = !needsTotp;
+  input('totp').required = needsTotp;
+  message('login-msg', null);
+  const savedUser = storage()?.getItem('wrhs.user') ?? '';
+  if (savedUser && !input('user').value) input('user').value = savedUser;
+  show('view-login', input('user').value ? input('password') : input('user'));
+  title(`Sign in · ${agentLabel()}`);
+  startSessionTimer();
 }
 
-function showDevice(persistent: boolean): void {
+let deviceKeyLoad: Promise<void> | null = null;
+
+/** Load (or create) this browser's device key exactly once. */
+function ensureDeviceKey(): Promise<void> {
+  deviceKeyLoad ??= loadDeviceKey().then((d) => {
+    deviceKey = d.key;
+    devicePersistent = d.persistent;
+    showDeviceKey();
+  });
+  return deviceKeyLoad;
+}
+
+function showDeviceKey(): void {
   if (!deviceKey) return;
-  $('device').textContent = `This device: ${fingerprint(deviceKey.publicKey)}${persistent ? '' : ' (temporary key)'}`;
+  const text = `${fingerprint(deviceKey.publicKey)}${devicePersistent ? '' : ' (temporary: this browser cannot store it)'}`;
+  $('device').textContent = text;
+  $('d-device').textContent = text;
 }
 
 function failConnect(err: Error): void {
-  if (err instanceof PinMismatchError) {
-    security('bad', 'Identity check failed');
-    showClosed(
-      'Possible interception detected',
-      'The server did not prove it is your agent (its key does not match the one pinned in this launcher). ' +
-        'Someone on the network may be trying to intercept the connection. Nothing was sent. ' +
-        'Do not retry from this network until you have checked with your administrator.',
-    );
+  const result = describeConnectError(err, relayHost);
+  conn = null;
+  session = null;
+  if (typeof result === 'string') {
+    badge('warn', 'Not connected');
+    title('Not connected');
+    message('connect-msg', result);
     return;
   }
-  security('warn', 'Not connected');
-  const text =
-    err instanceof RelayError && err.code === 'agent-offline'
-      ? 'The agent is not connected to the relay right now.'
-      : `Could not connect: ${err.message}`;
-  message('connect-msg', text);
+  badge('bad', 'Identity check failed');
+  showClosed(result);
 }
 
-function onConnectionState(state: ConnectionState, detail?: string): void {
-  if (state === 'open') security('ok', `End-to-end encrypted to ${conn?.agentHello?.name ?? agentName ?? 'agent'}`);
-  else if (state === 'reconnecting') security('warn', 'Reconnecting… (session preserved)');
-  else if (state === 'handshaking') security('warn', 'Verifying agent identity…');
-  updateDetails(detail);
-}
-
-function updateDetails(detail?: string): void {
-  if (!conn) return;
-  const parts: string[] = [];
-  if (session) parts.push(`agent ${fingerprint(session.remoteStatic)}`);
-  parts.push('Noise XXhfs · X25519 + ML-KEM-768');
-  if (conn.transportKind) parts.push(conn.transportKind === 'websocket' ? 'WebSocket' : 'HTTPS long-poll');
-  if (session?.rttMs != null) parts.push(`${Math.round(session.rttMs)} ms`);
-  if (detail && conn.state === 'reconnecting') parts.push(detail);
-  $('details').textContent = parts.join(' · ');
-}
-
-function onSessionClosed(reason: string, error?: Error): void {
-  stopRemote();
-  if (error instanceof IntegrityError) {
-    security('bad', 'Tampering detected');
-    showClosed(
-      'Connection terminated: traffic was modified',
-      'Data arriving from the network failed its integrity check, which means something between you and the agent ' +
-        'altered it. The session was closed to protect you; nothing altered was used.',
-    );
-    return;
+function onConnectionState(state: ConnectionState): void {
+  switch (state) {
+    case 'connecting':
+      badge('warn', 'Connecting…');
+      break;
+    case 'handshaking':
+      badge('warn', 'Verifying agent…');
+      break;
+    case 'open':
+      badge('ok', 'Encrypted', ` to ${agentLabel()}`);
+      $('reconnect-overlay').hidden = true;
+      if (currentView === 'remote') title(`${reopenTarget?.name ?? 'Desktop'} · ${agentLabel()}`);
+      break;
+    case 'reconnecting':
+      badge('warn', 'Reconnecting…');
+      if (currentView === 'remote') $('reconnect-overlay').hidden = false;
+      title('Reconnecting…');
+      break;
+    case 'closed':
+      break;
   }
-  security('warn', 'Disconnected');
-  showClosed('Disconnected', reason);
+  refreshDetails();
 }
 
-function showClosed(title: string, text: string): void {
-  $('closed-title').textContent = title;
-  message('closed-msg', text, 'warn');
-  show('view-closed');
+// ------------------------------------------------------------------ header
+
+function resetHeader(): void {
+  $('signout-btn').hidden = true;
+  $('details-btn').hidden = true;
+  toggleDetails(false);
+  $('session-banner').hidden = true;
 }
 
-// ------------------------------------------------------------------ login
+function refreshDetails(): void {
+  $('d-agent').textContent = agentLabel();
+  $('d-fp').textContent = session ? fingerprint(session.remoteStatic) : '';
+  $('d-transport').textContent =
+    conn?.transportKind === 'websocket' ? 'WebSocket over HTTPS' : conn?.transportKind === 'longpoll' ? 'HTTPS long-polling' : '';
+  $('d-rtt').textContent = session?.rttMs != null ? `${Math.round(session.rttMs)} ms` : 'measuring…';
+}
+
+function toggleDetails(open?: boolean): void {
+  const btn = $('details-btn');
+  const next = open ?? btn.getAttribute('aria-expanded') !== 'true';
+  btn.setAttribute('aria-expanded', String(next));
+  $('details-panel').hidden = !next;
+  if (next) refreshDetails();
+}
+
+// ------------------------------------------------------------------ sign in
 
 async function login(ev: SubmitEvent): Promise<void> {
   ev.preventDefault();
   if (!app) return;
   message('login-msg', null);
-  const user = $<HTMLInputElement>('user').value.trim();
-  const pw = $<HTMLInputElement>('password');
-  const totp = $<HTMLInputElement>('totp').value.trim();
+  const userField = input('user');
+  const pw = input('password');
+  const totpField = input('totp');
+  const user = userField.value.trim();
+  const code = totpField.value.replace(/\s+/g, '');
+  if (!user) return void (message('login-msg', 'Enter your user name.'), userField.focus());
+  if (!pw.value) return void (message('login-msg', 'Enter your password.'), pw.focus());
+  if (totpField.required && !/^\d{6}$/.test(code)) {
+    totpField.setAttribute('aria-invalid', 'true');
+    message('login-msg', 'Enter the 6-digit code from your authenticator app.');
+    totpField.focus();
+    return;
+  }
+  totpField.removeAttribute('aria-invalid');
+  const btn = $<HTMLButtonElement>('login-btn');
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
   try {
-    const targets = await app.login(user, pw.value, totp || undefined);
+    targets = await app.login(user, pw.value, code || undefined);
+    storage()?.setItem('wrhs.user', user);
     pw.value = '';
-    renderTargets(targets);
-    show('view-targets');
+    totpField.value = '';
+    renderTargets();
+    showTargets(targets.length ? null : 'No desktops are assigned to your account. Ask your administrator.', 'warn');
   } catch (err) {
     pw.value = '';
-    $<HTMLInputElement>('totp').value = '';
-    const e = err as Error;
-    const extra = err instanceof AuthError && err.retryAfterMs ? ` Try again in ${Math.ceil(err.retryAfterMs / 1000)} s.` : '';
-    message('login-msg', `${e.message}.${extra}`);
+    totpField.value = '';
+    if (session?.closed || closedShown) return;
+    message('login-msg', describeAuthError(err));
+    pw.focus();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
   }
 }
 
-function renderTargets(targets: TargetInfo[]): void {
+// ------------------------------------------------------------------ desktop list
+
+function renderTargets(): void {
   const list = $('target-list');
   list.replaceChildren();
-  if (targets.length === 0) message('targets-msg', 'No desktops are assigned to your account.', 'warn');
   for (const t of targets) {
     const li = document.createElement('li');
     const b = document.createElement('button');
     b.type = 'button';
+    b.dataset.target = t.id;
+    b.setAttribute('aria-pressed', 'false');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = t.name;
     const proto = document.createElement('span');
     proto.className = 'proto';
     proto.textContent = t.protocol;
-    b.append(proto, document.createTextNode(t.name));
+    b.append(name, proto);
     b.addEventListener('click', () => chooseTarget(t));
     li.append(b);
     list.append(li);
   }
 }
 
+function resetCredsForm(): void {
+  pendingTarget = null;
+  $('rdp-creds').hidden = true;
+  input('rdp-user').value = '';
+  input('rdp-pass').value = '';
+  input('rdp-domain').value = '';
+  for (const b of $('target-list').querySelectorAll('button')) b.setAttribute('aria-pressed', 'false');
+}
+
+function showTargets(text: string | null = null, tone: Tone = 'warn'): void {
+  resetCredsForm();
+  message('targets-msg', text, tone);
+  const reopen = $<HTMLButtonElement>('reopen-btn');
+  reopen.hidden = !reopenTarget || !text;
+  if (reopenTarget) reopen.textContent = `Reconnect to ${reopenTarget.name}`;
+  title(agentLabel());
+  show('view-targets', text && !reopen.hidden ? reopen : null);
+}
+
 function chooseTarget(t: TargetInfo): void {
   message('targets-msg', null);
+  $('reopen-btn').hidden = true;
   if (t.promptCredentials) {
+    resetCredsForm();
     pendingTarget = t;
+    $('target-list').querySelector(`button[data-target="${CSS.escape(t.id)}"]`)?.setAttribute('aria-pressed', 'true');
     $('creds-target').textContent = t.name;
     $('rdp-creds').hidden = false;
-    $('rdp-user').focus();
+    input('rdp-user').focus();
     return;
   }
   void openTarget(t);
 }
 
 async function openTarget(t: TargetInfo, credentials?: { username?: string; password?: string; domain?: string }): Promise<void> {
-  if (!app) return;
-  show('remote');
-  const el = $('display');
-  const density = window.devicePixelRatio || 1;
+  if (!app || !session) return;
+  desktopActive = true;
+  reopenTarget = t;
+  $('loading-text').textContent = `Connecting to ${t.name}…`;
+  $('loading-overlay').hidden = false;
+  $('remote-title').textContent = `Remote desktop: ${t.name}`;
+  show('remote', $('display'));
+  title(`${t.name} · ${agentLabel()}`);
   try {
     await app.open({
       target: t.id,
-      width: Math.round(el.clientWidth * density),
-      height: Math.round(el.clientHeight * density),
-      dpi: Math.round(96 * density),
+      ...remoteSize($('display')),
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       ...(credentials ? { credentials } : {}),
     });
-  } catch (err) {
-    show('view-targets');
-    message('targets-msg', (err as Error).message);
+  } catch {
+    $('loading-overlay').hidden = true;
+    if (session?.closed || closedShown || !desktopActive) return;
+    desktopActive = false;
+    showTargets(`Could not open ${t.name}. The computer may be turned off or unreachable from the agent.`, 'error');
     return;
   }
-  startRemote();
+  if (!desktopActive || currentView !== 'remote') {
+    // The user left while the agent was connecting.
+    app.closeDesktop();
+    return;
+  }
+  remote = new RemoteDesktop(
+    app,
+    session,
+    {
+      container: $('display'),
+      loading: $('loading-overlay'),
+      loadingText: $('loading-text'),
+      softKeyboard: $<HTMLTextAreaElement>('soft-kbd'),
+    },
+    { onError: (msg) => onRemoteEnded(`The remote desktop reported an error: ${msg}`) },
+  );
+  remote.start();
 }
 
-// ------------------------------------------------------------------ remote desktop
+/** The agent says the remote desktop connection ended. */
+function onRemoteEnded(text = `The remote desktop session ended.`): void {
+  if (!desktopActive) return;
+  desktopActive = false;
+  stopRemote();
+  showTargets(text, 'warn');
+}
 
-let keyboard: GuacKeyboard | null = null;
-let resizeTimer: ReturnType<typeof setTimeout> | null = null;
-
-function startRemote(): void {
-  if (!app || !session) return;
-  const s = session;
-  const container = $('display');
-  const client = new Guacamole.Client(createEncryptedTunnel(app));
-  guac = client;
-  const display = client.getDisplay();
-  container.replaceChildren(display.getElement());
-
-  const fit = () => {
-    const w = display.getWidth();
-    const h = display.getHeight();
-    if (!w || !h) return;
-    display.scale(Math.min(container.clientWidth / w, container.clientHeight / h));
-  };
-  display.onresize = fit;
-
-  client.onerror = (status) => {
-    stopRemote();
-    show('view-targets');
-    message('targets-msg', `Remote desktop error: ${status.message ?? status.code}`);
-  };
-  client.onclipboard = (stream, mimetype) => {
-    if (!/^text\//.test(mimetype)) return;
-    const reader = new Guacamole.StringReader(stream);
-    let text = '';
-    reader.ontext = (t) => (text += t);
-    reader.onend = () => void navigator.clipboard?.writeText(text).catch(() => {});
-  };
-
-  const mouse = new Guacamole.Mouse(display.getElement());
-  mouse.onEach(['mousedown', 'mouseup', 'mousemove'], (e) => client.sendMouseState(e.state, true));
-
-  keyboard ??= new Guacamole.Keyboard(container);
-  keyboard.onkeydown = (keysym) => {
-    s.markInteractive();
-    guac?.sendKeyEvent(1, keysym);
-    return false;
-  };
-  keyboard.onkeyup = (keysym) => {
-    s.markInteractive();
-    guac?.sendKeyEvent(0, keysym);
-  };
-
-  client.connect();
-  container.focus();
-  container.addEventListener('mousedown', () => container.focus());
-  fit();
+function closeDesktop(): void {
+  desktopActive = false;
+  reopenTarget = null;
+  stopRemote();
+  app?.closeDesktop();
+  showTargets();
 }
 
 function stopRemote(): void {
-  if (keyboard) {
-    keyboard.onkeydown = null;
-    keyboard.onkeyup = null;
-    keyboard.reset();
+  if (remote) lastRemoteInput = Math.max(lastRemoteInput, remote.lastInputAt);
+  remote?.stop();
+  remote = null;
+  $('loading-overlay').hidden = true;
+  $('reconnect-overlay').hidden = true;
+  if (document.fullscreenElement) void document.exitFullscreen().catch(() => {});
+}
+
+// ------------------------------------------------------------------ closing
+
+function signOut(): void {
+  if (!conn) return;
+  const c = conn;
+  onSessionClosed('signed out', undefined, true);
+  c.close('signed out');
+}
+
+function onSessionClosed(reason: string, error: Error | undefined, userInitiated: boolean): void {
+  if (closedShown) return;
+  closedShown = true;
+  desktopActive = false;
+  stopRemote();
+  stopSessionTimer();
+  resetHeader();
+  const notice = describeClose(reason, error, userInitiated);
+  if (notice.security) badge('bad', 'Tampering detected');
+  else badge('warn', userInitiated ? 'Signed out' : 'Disconnected');
+  showClosed(notice);
+}
+
+let closedAction: 'reconnect' | 'start' = 'reconnect';
+
+function showClosed(n: Notice): void {
+  $('closed-title').textContent = n.title;
+  message('closed-msg', n.text, n.tone);
+  const btn = $('reconnect-btn');
+  btn.textContent = n.action;
+  // After a security event the safe choice should not look like the default.
+  btn.className = n.security ? 'secondary' : 'primary';
+  closedAction = n.security ? 'start' : 'reconnect';
+  title(n.title);
+  show('view-closed');
+}
+
+function resetSession(): void {
+  conn = null;
+  app = null;
+  session = null;
+  remote = null;
+  targets = [];
+  reopenTarget = null;
+  closedShown = false;
+  message('connect-msg', null);
+}
+
+// ------------------------------------------------------------------ session warnings
+
+function startSessionTimer(): void {
+  stopSessionTimer();
+  sessionTimer = setInterval(updateSessionBanner, 1000);
+}
+
+function stopSessionTimer(): void {
+  if (sessionTimer) clearInterval(sessionTimer);
+  sessionTimer = null;
+  $('session-banner').hidden = true;
+}
+
+function updateSessionBanner(): void {
+  const limits = app?.limits;
+  const banner = $('session-banner');
+  if (!limits || !session || session.closed) {
+    banner.hidden = true;
+    return;
   }
-  guac?.disconnect();
-  guac = null;
-  $('display').replaceChildren();
+  const now = Date.now();
+  const lastInput = Math.max(lastRemoteInput, remote?.lastInputAt ?? 0);
+  const idleLeft = limits.idleTimeoutSeconds > 0 ? limits.idleTimeoutSeconds * 1000 - (now - lastInput) : Infinity;
+  const maxLeft = limits.maxSessionSeconds > 0 ? limits.maxSessionSeconds * 1000 - (now - connectedAt) : Infinity;
+  let text = '';
+  if (idleLeft <= IDLE_WARNING_MS) {
+    text = remote
+      ? `You’ll be signed out in ${formatCountdown(idleLeft)} because of inactivity. Move the mouse or press a key to stay signed in.`
+      : `You’ll be signed out in ${formatCountdown(idleLeft)} because of inactivity.`;
+  } else if (maxLeft <= MAX_SESSION_WARNING_MS) {
+    text = `This session reaches its time limit in ${formatCountdown(maxLeft)}. Save your work.`;
+  }
+  if (banner.textContent !== text) banner.textContent = text;
+  banner.hidden = !text;
 }
 
-function onDisplayResize(): void {
-  if (!guac) return;
-  if (resizeTimer) clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => {
-    const el = $('display');
-    const density = window.devicePixelRatio || 1;
-    guac?.sendSize(Math.round(el.clientWidth * density), Math.round(el.clientHeight * density));
-    const d = guac?.getDisplay();
-    if (d && d.getWidth()) d.scale(Math.min(el.clientWidth / d.getWidth(), el.clientHeight / d.getHeight()));
-  }, 250);
-}
+// ------------------------------------------------------------------ remote toolbar
 
-function sendCtrlAltDel(): void {
-  const keys = [0xffe3, 0xffe9, 0xffff];
-  for (const k of keys) guac?.sendKeyEvent(1, k);
-  for (const k of keys.reverse()) guac?.sendKeyEvent(0, k);
-}
-
-async function sendClipboard(): Promise<void> {
-  if (!guac) return;
+async function pasteText(): Promise<void> {
+  if (!remote) return;
   let text: string | null = null;
   try {
     text = await navigator.clipboard.readText();
   } catch {
-    text = window.prompt('Text to send to the remote clipboard:');
+    text = window.prompt('Text to send to the remote computer’s clipboard:');
   }
+  remote.focus();
   if (!text) return;
-  const writer = new Guacamole.StringWriter(guac.createClipboardStream('text/plain'));
-  writer.sendText(text);
-  writer.sendEnd();
-  $('display').focus();
+  remote.sendClipboardText(text);
+  toast('Text sent to the remote clipboard. Paste it there with Ctrl+V.');
+}
+
+async function toggleFullscreen(): Promise<void> {
+  if (document.fullscreenElement) {
+    await document.exitFullscreen().catch(() => {});
+    return;
+  }
+  try {
+    await $('remote').requestFullscreen();
+    // Let shortcuts such as Alt+Tab and Ctrl+W reach the remote computer
+    // (Chromium; hold Esc to leave full screen).
+    await (navigator as unknown as { keyboard?: { lock?: () => Promise<void> } }).keyboard?.lock?.();
+  } catch {
+    // Full screen or keyboard lock not available.
+  }
+  remote?.focus();
+}
+
+function onFullscreenChange(): void {
+  const full = Boolean(document.fullscreenElement);
+  const label = full ? 'Exit full screen' : 'Full screen';
+  $('full-label').textContent = label;
+  $('full-btn').setAttribute('aria-label', label);
+  remote?.resize();
+  if (!full) (navigator as unknown as { keyboard?: { unlock?: () => void } }).keyboard?.unlock?.();
 }
 
 // ------------------------------------------------------------------ wiring
 
-$('connect-btn').addEventListener('click', () => void connect());
-$('manual').addEventListener('submit', (e) => {
+$('connect-form').addEventListener('submit', (e) => {
   e.preventDefault();
   void connect();
 });
+input('agent-key').addEventListener('input', previewKeyFingerprint);
 $('login-form').addEventListener('submit', (e) => void login(e as SubmitEvent));
 $('rdp-creds').addEventListener('submit', (e) => {
   e.preventDefault();
   const t = pendingTarget;
   if (!t) return;
-  const pass = $<HTMLInputElement>('rdp-pass');
   const creds = {
-    username: $<HTMLInputElement>('rdp-user').value,
-    password: pass.value,
-    domain: $<HTMLInputElement>('rdp-domain').value,
+    username: input('rdp-user').value.trim(),
+    password: input('rdp-pass').value,
+    domain: input('rdp-domain').value.trim(),
   };
-  pass.value = '';
-  $('rdp-creds').hidden = true;
+  resetCredsForm();
   void openTarget(t, creds);
 });
-$('disconnect-btn').addEventListener('click', () => conn?.close('disconnected by user'));
-$('cad-btn').addEventListener('click', sendCtrlAltDel);
-$('paste-btn').addEventListener('click', () => void sendClipboard());
-$('full-btn').addEventListener('click', () => void $('remote').requestFullscreen?.().catch(() => {}));
-$('reconnect-btn').addEventListener('click', () => {
-  conn = null;
-  app = null;
-  session = null;
-  $('details').textContent = '';
-  security('warn', 'Not connected');
-  initConnectView();
+$('creds-cancel').addEventListener('click', () => {
+  resetCredsForm();
+  $('target-list').querySelector<HTMLElement>('button')?.focus();
 });
-new ResizeObserver(onDisplayResize).observe($('display'));
-window.addEventListener('beforeunload', () => conn?.close('page closed'));
+$('reopen-btn').addEventListener('click', () => {
+  if (reopenTarget) chooseTarget(reopenTarget);
+});
+$('signout-btn').addEventListener('click', signOut);
+$('details-btn').addEventListener('click', () => toggleDetails());
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('details-panel').hidden) {
+    toggleDetails(false);
+    $('details-btn').focus();
+  }
+});
+document.addEventListener('click', (e) => {
+  const t = e.target as Node;
+  if (!$('details-panel').hidden && !$('details-panel').contains(t) && !$('details-btn').contains(t)) toggleDetails(false);
+});
+$('close-desktop-btn').addEventListener('click', closeDesktop);
+$('cad-btn').addEventListener('click', () => {
+  remote?.sendCtrlAltDel();
+  remote?.focus();
+});
+$('paste-btn').addEventListener('click', () => void pasteText());
+$('kbd-btn').addEventListener('click', () => remote?.showSoftKeyboard());
+$('full-btn').addEventListener('click', () => void toggleFullscreen());
+document.addEventListener('fullscreenchange', onFullscreenChange);
+$('reconnect-btn').addEventListener('click', () => {
+  resetSession();
+  if (closedAction === 'reconnect') {
+    initConnectView();
+    void connect();
+  } else {
+    initConnectView();
+  }
+});
+new ResizeObserver(() => remote?.resize()).observe($('display'));
+window.addEventListener('beforeunload', (e) => {
+  // Closing the tab ends the session; ask first while a desktop is open.
+  if (remote) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
+window.addEventListener('pagehide', () => conn?.close('page closed'));
 
 initConnectView();
-void loadDeviceKey().then((d) => {
-  deviceKey ??= d.key;
-  showDevice(d.persistent);
-});
+void ensureDeviceKey();

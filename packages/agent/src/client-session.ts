@@ -64,6 +64,10 @@ export class ClientSessionHandler {
   #authBusy = false;
   #guac: Socket | null = null;
   #targetId: string | null = null;
+  /** Client reference of the open request being served (echoed in replies). */
+  #openRef: number | undefined;
+  /** Bumped on every open/close so a slow guacd connect can tell it was superseded. */
+  #openGen = 0;
   #lastInputAt = Date.now();
   #timers: ReturnType<typeof setTimeout>[] = [];
   #device = '';
@@ -189,6 +193,9 @@ export class ClientSessionHandler {
       case 'open':
         this.#onOpen(msg).catch((err: Error) => this.#internalError(err));
         return;
+      case 'close-desktop':
+        this.#dropDesktop('closed by user');
+        return;
       default:
         return;
     }
@@ -227,7 +234,12 @@ export class ClientSessionHandler {
       if (this.#state !== 'auth') return; // closed or timed out while we slept
       this.#authBusy = false;
       this.#ctx.log('login-fail', { sid: this.sid, user: msg.user, device: this.#device, reason: failure });
-      this.#control({ t: 'auth-fail', message: failure, ...(r.ok ? {} : r.retryAfterMs ? { retryAfterMs: r.retryAfterMs } : {}) });
+      this.#control({
+        t: 'auth-fail',
+        message: failure,
+        attemptsLeft: Math.max(0, MAX_AUTH_ATTEMPTS_PER_SESSION - this.#authAttempts),
+        ...(r.ok ? {} : r.retryAfterMs ? { retryAfterMs: r.retryAfterMs } : {}),
+      });
       if (this.#authAttempts >= MAX_AUTH_ATTEMPTS_PER_SESSION) this.end('too many failed logins');
       return;
     }
@@ -236,7 +248,12 @@ export class ClientSessionHandler {
     this.#state = 'ready';
     this.#session!.followPeerCadence = true;
     this.#ctx.log('login-ok', { sid: this.sid, user: user!.name, device: this.#device });
-    this.#control({ t: 'auth-ok', targets: this.#targetsFor(user!).map(targetInfo) });
+    const p = this.#ctx.config.policy;
+    this.#control({
+      t: 'auth-ok',
+      targets: this.#targetsFor(user!).map(targetInfo),
+      limits: { idleTimeoutSeconds: p.idleTimeoutSeconds, maxSessionSeconds: p.maxSessionSeconds },
+    });
   }
 
   #internalError(err: Error): void {
@@ -249,10 +266,27 @@ export class ClientSessionHandler {
     return user.targets === '*' ? all : all.filter((t) => (user.targets as string[]).includes(t.id));
   }
 
+  /** End the current remote desktop without telling the client (it asked, or replaced it). */
+  #dropDesktop(reason: string): void {
+    if (this.#state !== 'remote') return;
+    this.#openGen++;
+    const socket = this.#guac;
+    this.#guac = null;
+    this.#state = 'ready';
+    this.#ctx.log('target-closed', { sid: this.sid, user: this.#user?.name, target: this.#targetId, reason });
+    this.#targetId = null;
+    socket?.destroy();
+  }
+
   async #onOpen(msg: Extract<ControlMessage, { t: 'open' }>): Promise<void> {
-    if (this.#state !== 'ready' || !this.#user) return;
+    const ref = typeof msg.ref === 'number' && Number.isSafeInteger(msg.ref) ? msg.ref : undefined;
+    if (!this.#user || (this.#state !== 'ready' && this.#state !== 'remote')) {
+      return this.#control({ t: 'open-fail', message: 'not signed in', ref });
+    }
+    // A new request replaces whatever desktop is open or still opening.
+    this.#dropDesktop('replaced by a new request');
     const target = this.#targetsFor(this.#user).find((t) => t.id === msg.target);
-    if (!target) return this.#control({ t: 'open-fail', message: 'unknown target' });
+    if (!target) return this.#control({ t: 'open-fail', message: 'unknown target', ref });
     const size = {
       width: clampInt(msg.width, 320, 8192, 1280),
       height: clampInt(msg.height, 200, 8192, 720),
@@ -261,6 +295,8 @@ export class ClientSessionHandler {
     const creds = target.username ? {} : sanitizeCreds(msg.credentials);
     this.#state = 'remote';
     this.#targetId = target.id;
+    this.#openRef = ref;
+    const gen = ++this.#openGen;
     try {
       const { socket, leftover } = await connectGuacd({
         host: this.#ctx.config.guacd.host,
@@ -270,24 +306,24 @@ export class ClientSessionHandler {
         ...size,
         ...(typeof msg.timezone === 'string' && /^[A-Za-z0-9_/+-]{1,64}$/.test(msg.timezone) ? { timezone: msg.timezone } : {}),
       });
-      if ((this.#state as State) === 'closed') {
-        socket.destroy();
+      if ((this.#state as State) === 'closed' || gen !== this.#openGen) {
+        socket.destroy(); // session ended or the request was superseded
         return;
       }
       this.#guac = socket;
       this.#ctx.log('target-open', { sid: this.sid, user: this.#user.name, target: target.id });
-      this.#control({ t: 'open-ok' });
+      this.#control({ t: 'open-ok', ref });
       if (leftover.length) this.#toClient(leftover);
       socket.on('data', (chunk: Buffer) => this.#toClient(chunk));
       socket.on('close', () => this.#onGuacClosed(socket));
       socket.on('error', () => socket.destroy());
       socket.resume();
     } catch (err) {
-      if ((this.#state as State) === 'closed') return;
+      if ((this.#state as State) === 'closed' || gen !== this.#openGen) return;
       this.#state = 'ready';
       this.#targetId = null;
       this.#ctx.log('target-fail', { sid: this.sid, user: this.#user.name, target: target.id, error: (err as Error).message });
-      this.#control({ t: 'open-fail', message: 'could not connect to the remote desktop' });
+      this.#control({ t: 'open-fail', message: 'could not connect to the remote desktop', ref });
     }
   }
 
@@ -313,7 +349,7 @@ export class ClientSessionHandler {
     this.#ctx.log('target-closed', { sid: this.sid, user: this.#user?.name, target: this.#targetId });
     this.#state = 'ready';
     this.#targetId = null;
-    this.#control({ t: 'closed', message: 'remote desktop disconnected' });
+    this.#control({ t: 'closed', message: 'remote desktop disconnected', ref: this.#openRef });
   }
 
   #scheduleIdleCheck(): void {

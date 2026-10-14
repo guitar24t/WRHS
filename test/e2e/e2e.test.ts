@@ -76,6 +76,7 @@ for (const transport of ['websocket', 'longpoll'] as const) {
       assert.equal(c.conn.transportKind, transport);
       assert.equal(c.conn.agentHello?.name, 'test-agent');
       const totp = await loginAndOpen(stack, c);
+      assert.deepEqual(c.app.limits, { idleTimeoutSeconds: 3600, maxSessionSeconds: 43200 }, 'agent announces its limits');
 
       // Keystroke through the tunnel, echoed by guacd.
       c.app.sendGuac('3.key,5.65307,1.1;');
@@ -181,9 +182,19 @@ test('wrong password or TOTP is rejected, and the session is closed after 3 atte
   const stack = await startStack();
   try {
     const c = await connect(stack, 'websocket');
-    await assert.rejects(c.app.login('alice', 'wrong-password-123', stack.currentTotp()), AuthError);
-    await assert.rejects(c.app.login('alice', PASSWORD, '000000'), AuthError);
-    await assert.rejects(c.app.login('mallory', PASSWORD, stack.currentTotp()), AuthError);
+    const left: (number | undefined)[] = [];
+    for (const [user, pw, code] of [
+      ['alice', 'wrong-password-123', stack.currentTotp()],
+      ['alice', PASSWORD, '000000'],
+      ['mallory', PASSWORD, stack.currentTotp()],
+    ] as const) {
+      await assert.rejects(c.app.login(user, pw, code), (err: unknown) => {
+        assert.ok(err instanceof AuthError);
+        left.push(err.attemptsLeft);
+        return true;
+      });
+    }
+    assert.deepEqual(left, [2, 1, 0], 'the agent reports attempts left on this connection');
     await waitFor(() => c.session.closed, 5000, 'session closed after 3 failures');
     assert.equal(stack.guacd.connections.length, 0);
   } finally {
@@ -205,6 +216,38 @@ test('garbage sent while a failed login is pending does not crash the agent', as
     const d = await connect(stack, 'websocket');
     await d.app.login('alice', PASSWORD, stack.currentTotp());
     d.conn.close();
+  } finally {
+    await stack.close();
+  }
+});
+
+test('closing a desktop and reopening at once works; a new open replaces the old desktop', async () => {
+  const stack = await startStack();
+  try {
+    const c = await connect(stack, 'websocket');
+    await loginAndOpen(stack, c);
+    const closedRefs: (number | undefined)[] = [];
+    c.app.on('control', (m) => {
+      if (m.t === 'closed') closedRefs.push(m.ref);
+    });
+    const size = { target: 'office-pc', width: 800, height: 600, dpi: 96, credentials: { username: RDP_USER, password: RDP_PASS } };
+    // Close and immediately reopen: the agent must answer the new request.
+    c.app.closeDesktop();
+    const second = await c.app.open(size);
+    // Open again without closing: replaces the second desktop.
+    const third = await c.app.open(size);
+    assert.ok(third > second);
+    await waitFor(() => stack.guacd.connections.length === 3, 5000, 'three guacd connections');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.deepEqual(closedRefs, [], 'replaced or closed desktops are not reported as ended');
+    // The current desktop works.
+    c.app.sendGuac('3.key,2.99,1.1;');
+    await waitFor(() => stack.guacd.connections[2]!.received.some((i) => i[0] === 'key'), 5000, 'input reaches the newest desktop');
+    // When it ends on the remote side, the notice carries its reference.
+    stack.guacd.dropConnections();
+    await waitFor(() => closedRefs.length === 1, 5000, 'closed notice');
+    assert.deepEqual(closedRefs, [third]);
+    c.conn.close();
   } finally {
     await stack.close();
   }

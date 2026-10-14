@@ -21,8 +21,14 @@ interface GuacStatus {
   message?: string;
 }
 
+interface GuacLayer {
+  getCanvas(): HTMLCanvasElement;
+}
+
 interface GuacDisplay {
   getElement(): HTMLElement;
+  getDefaultLayer(): GuacLayer;
+  oncursor: ((canvas: HTMLCanvasElement, x: number, y: number) => void) | null;
   getWidth(): number;
   getHeight(): number;
   scale(s: number): void;
@@ -49,21 +55,32 @@ interface GuacKeyboard {
   onkeydown: ((keysym: number) => boolean | void) | null;
   onkeyup: ((keysym: number) => void) | null;
   reset(): void;
+  press(keysym: number): boolean;
+  release(keysym: number): void;
+  type(text: string): void;
 }
 
 interface GuacMouse {
+  onEach(types: string[], fn: (e: { state: unknown }) => void): void;
+  setCursor(canvas: HTMLCanvasElement, x: number, y: number): boolean;
+}
+
+interface GuacTouchscreen {
   onEach(types: string[], fn: (e: { state: unknown }) => void): void;
 }
 
 interface GuacamoleNS {
   Tunnel: { new (): GuacTunnel; State: { CONNECTING: number; OPEN: number; CLOSED: number; UNSTABLE: number } };
-  Client: { new (tunnel: GuacTunnel): GuacClient; State: Record<string, number> };
+  Client: {
+    new (tunnel: GuacTunnel): GuacClient;
+    State: { IDLE: number; CONNECTING: number; WAITING: number; CONNECTED: number; DISCONNECTING: number; DISCONNECTED: number };
+  };
   Parser: {
     new (): { receive(packet: string): void; oninstruction: ((opcode: string, args: string[]) => void) | null };
     toInstruction(elements: ArrayLike<unknown>): string;
   };
   Keyboard: new (element: HTMLElement | Document) => GuacKeyboard;
-  Mouse: new (element: HTMLElement) => GuacMouse;
+  Mouse: { new (element: HTMLElement): GuacMouse; Touchscreen: new (element: HTMLElement) => GuacTouchscreen };
   Status: { new (code: number, message?: string): GuacStatus; Code: Record<string, number> };
   StringReader: new (stream: unknown) => { ontext: ((t: string) => void) | null; onend: (() => void) | null };
   StringWriter: new (stream: unknown) => { sendText(t: string): void; sendEnd(): void };

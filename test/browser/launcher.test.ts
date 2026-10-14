@@ -1,68 +1,32 @@
 // Real-browser test: open a personalized launcher from file:// in Chromium,
 // sign in, open a desktop and type, all through the intercepting proxy.
-// Skipped when Playwright is not installed (set PLAYWRIGHT_MODULE to its
-// entry point if it is installed globally).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { renderLauncher } from '@wrhs/agent';
-import { DESKTOP_NAME, PASSWORD, RDP_PASS, RDP_USER, startStack, waitFor } from '../e2e/harness.ts';
+import { DESKTOP_NAME, PASSWORD, waitFor } from '../e2e/harness.ts';
+import { launch, signIn, skip, stackWithLauncher, watchProblems, type Any } from './helpers.ts';
 
-// Typed loosely so the repo does not depend on Playwright's type package.
-interface ConsoleMsg {
-  type(): string;
-  text(): string;
-}
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let pw: any = null;
-try {
-  pw = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright');
-} catch {
-  pw = null;
-}
+const RDP_USER = 'SECRET-RDP-USER';
+const RDP_PASS = 'SECRET-RDP-PASS-9f8e7d';
 
-test('offline launcher works in Chromium from file:// and the proxy sees no secrets', { skip: !pw && 'playwright not installed' }, async () => {
-  const stack = await startStack({
-    banner: [
-      ['name', DESKTOP_NAME],
-      ['size', '0', '800', '600'],
-      ['rect', '0', '0', '0', '800', '600'],
-      ['cfill', '14', '0', '0', '160', '80', '255'],
-      ['sync', '1000'],
-    ],
-  });
-  const dir = mkdtempSync(join(tmpdir(), 'wrhs-launcher-'));
-  const file = join(dir, 'launcher.html');
-  writeFileSync(file, renderLauncher({ relayUrl: stack.mitm.url, agentPublicKeys: [stack.agentKey.publicKey], name: 'Test agent' }).html);
-
-  const browser = await pw.chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
-  const problems: string[] = [];
+test('offline launcher works in Chromium from file:// and the proxy sees no secrets', { skip }, async () => {
+  const { stack, url } = await stackWithLauncher();
+  const browser: Any = await launch();
   try {
     const page = await browser.newPage({ viewport: { width: 1100, height: 800 } });
-    page.on('console', (m: ConsoleMsg) => {
-      if (m.type() === 'error') problems.push(m.text());
-    });
-    page.on('pageerror', (e: Error) => problems.push(e.message));
-    await page.goto(pathToFileURL(file).toString());
-    await page.getByText('Fingerprint').waitFor();
-    await page.click('#connect-btn');
-    await page.locator('#view-login').waitFor({ state: 'visible' });
-    assert.match(await page.locator('#security-text').textContent() ?? '', /End-to-end encrypted to test-agent/);
+    const problems = watchProblems(page);
+    await page.goto(url);
+    await page.locator('#profile').waitFor({ state: 'visible' });
+    await signIn(page, stack);
+    assert.match((await page.locator('#security-text').textContent()) ?? '', /Encrypted to test-agent/);
 
-    await page.fill('#user', 'alice');
-    await page.fill('#password', PASSWORD);
-    await page.fill('#totp', stack.currentTotp());
-    await page.click('#login-form button[type=submit]');
     await page.getByRole('button', { name: /Office PC/ }).click();
     await page.fill('#rdp-user', RDP_USER);
     await page.fill('#rdp-pass', RDP_PASS);
     await page.click('#rdp-creds button[type=submit]');
 
     await page.locator('#display canvas').first().waitFor();
+    await page.locator('#loading-overlay').waitFor({ state: 'hidden', timeout: 10_000 });
     await waitFor(() => stack.guacd.connections[0]?.received.some((i) => i[0] === 'sync') ?? false, 10_000, 'client sync reply');
     await page.click('#display');
     await page.keyboard.type('hi');
@@ -81,9 +45,9 @@ test('offline launcher works in Chromium from file:// and the proxy sees no secr
     for (const secret of [PASSWORD, RDP_USER, RDP_PASS, DESKTOP_NAME, 'alice']) {
       assert.equal(seen.includes(secret), false, `proxy saw ${secret}`);
     }
-    assert.deepEqual(problems.filter((p) => /Content Security Policy|Refused/i.test(p)), [], 'no CSP violations');
+    assert.deepEqual(problems, [], 'no console errors or CSP violations');
 
-    await page.click('#disconnect-btn');
+    await page.click('#signout-btn');
     await page.locator('#view-closed').waitFor({ state: 'visible' });
   } finally {
     await browser.close();
