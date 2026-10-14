@@ -56,3 +56,28 @@ test('RDP parameters enforce clipboard and file-transfer policy', () => {
   assert.equal(p['disable-upload'], 'true');
   assert.equal(p.port, '3389');
 });
+
+test('parallel guesses cannot exceed the failure budget (no lockout bypass)', async () => {
+  const secret = base32Encode(Buffer.from('12345678901234567890'));
+  const users = [{ name: 'carol', passwordHash: await hashPassword('carol password 123'), totpSecret: secret }];
+  const auth = new Authenticator(() => users, { requireTotp: true, maxFailures: 5, lockoutMs: 60_000 });
+  const now = 1234567890_000;
+  const guesses = Array.from({ length: 31 }, (_, i) => auth.authenticate('carol', `wrong ${i}`, '005924', now));
+  // The correct password arrives among the parallel guesses.
+  guesses.push(auth.authenticate('carol', 'carol password 123', '005924', now));
+  const results = await Promise.all(guesses);
+  const evaluated = results.filter((r) => !r.ok && r.message === 'invalid credentials').length;
+  assert.ok(evaluated <= 5, `at most maxFailures attempts are evaluated, got ${evaluated}`);
+  assert.equal(results.at(-1)!.ok, false, 'a correct guess beyond the budget is not evaluated');
+  assert.equal((await auth.authenticate('carol', 'carol password 123', '005924', now)).ok, false, 'account is now locked');
+});
+
+test('a failed extra check (device allow-list) is an ordinary failure and does not consume the TOTP step', async () => {
+  const secret = base32Encode(Buffer.from('12345678901234567890'));
+  const users = [{ name: 'dave', passwordHash: await hashPassword('dave password 123'), totpSecret: secret }];
+  const auth = new Authenticator(() => users, { requireTotp: true, maxFailures: 5, lockoutMs: 60_000 });
+  const now = 1234567890_000;
+  const denied = await auth.authenticate('dave', 'dave password 123', '005924', now, () => false);
+  assert.deepEqual(denied, { ok: false, message: 'invalid credentials' });
+  assert.deepEqual(await auth.authenticate('dave', 'dave password 123', '005924', now, () => true), { ok: true, user: 'dave' });
+});

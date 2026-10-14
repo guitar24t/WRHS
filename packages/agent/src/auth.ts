@@ -137,7 +137,7 @@ export type AuthResult =
 export class Authenticator {
   readonly #users: () => UserRecord[];
   readonly #policy: AuthPolicy;
-  readonly #failures = new Map<string, { count: number; lockedUntil: number }>();
+  readonly #failures = new Map<string, { count: number; inflight: number; lockedUntil: number }>();
   readonly #lastTotpCounter = new Map<string, number>();
 
   constructor(users: () => UserRecord[], policy: AuthPolicy) {
@@ -145,33 +145,63 @@ export class Authenticator {
     this.#policy = policy;
   }
 
-  async authenticate(userName: string, password: string, totp: string | undefined, now = Date.now()): Promise<AuthResult> {
+  /**
+   * @param extraCheck  additional condition evaluated like a credential
+   *   (e.g. the device allow-list); failing it is an ordinary failure.
+   */
+  async authenticate(
+    userName: string,
+    password: string,
+    totp: string | undefined,
+    now = Date.now(),
+    extraCheck: (user: string) => boolean = () => true,
+  ): Promise<AuthResult> {
     const key = userName.toLowerCase();
-    const f = this.#failures.get(key);
-    if (f && f.lockedUntil > now) {
-      return { ok: false, message: 'account temporarily locked', retryAfterMs: f.lockedUntil - now };
+    this.#prune(now);
+    const rec = this.#failures.get(key) ?? { count: 0, inflight: 0, lockedUntil: 0 };
+    if (rec.lockedUntil > now) {
+      return { ok: false, message: 'account temporarily locked', retryAfterMs: rec.lockedUntil - now };
     }
-    const user = this.#users().find((u) => u.name.toLowerCase() === key);
-    const passwordOk = await verifyPassword(password, user?.passwordHash);
-    let totpOk = true;
+    // Reserve a failure slot before the slow hash, so parallel attempts
+    // (from many sessions at once) cannot exceed the failure budget.
+    if (rec.count + rec.inflight >= this.#policy.maxFailures) {
+      return { ok: false, message: 'too many attempts in progress', retryAfterMs: 1000 };
+    }
+    rec.inflight++;
+    this.#failures.set(key, rec);
+    let ok = false;
     let counter: number | null = null;
-    if (user && (user.totpSecret || this.#policy.requireTotp)) {
-      counter = user.totpSecret ? verifyTotp(user.totpSecret, totp ?? '', now) : null;
-      const last = this.#lastTotpCounter.get(key) ?? -1;
-      totpOk = counter !== null && counter > last;
+    let user: UserRecord | undefined;
+    try {
+      user = this.#users().find((u) => u.name.toLowerCase() === key);
+      const passwordOk = await verifyPassword(password, user?.passwordHash);
+      let totpOk = true;
+      if (user && (user.totpSecret || this.#policy.requireTotp)) {
+        counter = user.totpSecret ? verifyTotp(user.totpSecret, totp ?? '', now) : null;
+        const last = this.#lastTotpCounter.get(key) ?? -1;
+        totpOk = counter !== null && counter > last;
+      }
+      ok = Boolean(user) && passwordOk && totpOk && extraCheck(user!.name);
+    } finally {
+      rec.inflight--;
     }
-    if (!user || !passwordOk || !totpOk) {
-      const rec = this.#failures.get(key) ?? { count: 0, lockedUntil: 0 };
+    if (!ok) {
       rec.count++;
       if (rec.count >= this.#policy.maxFailures) {
         rec.count = 0;
         rec.lockedUntil = now + this.#policy.lockoutMs;
       }
-      this.#failures.set(key, rec);
       return { ok: false, message: 'invalid credentials' };
     }
-    this.#failures.delete(key);
+    if (rec.inflight === 0) this.#failures.delete(key);
+    else rec.count = 0;
     if (counter !== null) this.#lastTotpCounter.set(key, counter);
-    return { ok: true, user: user.name };
+    return { ok: true, user: user!.name };
+  }
+
+  /** Forget stale failure records (one is created per guessed user name). */
+  #prune(now: number): void {
+    if (this.#failures.size < 10_000) return;
+    for (const [k, r] of this.#failures) if (r.inflight === 0 && r.lockedUntil <= now) this.#failures.delete(k);
   }
 }

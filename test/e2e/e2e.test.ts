@@ -191,6 +191,25 @@ test('wrong password or TOTP is rejected, and the session is closed after 3 atte
   }
 });
 
+test('garbage sent while a failed login is pending does not crash the agent', async () => {
+  const stack = await startStack();
+  try {
+    const c = await connect(stack, 'websocket');
+    await c.app.authMethods();
+    c.app.sendControl({ t: 'auth', user: 'alice', password: 'wrong-password-123', totp: '000000' });
+    await new Promise((r) => setTimeout(r, 300));
+    c.session.send(1, new TextEncoder().encode('not json'));
+    await waitFor(() => stack.agentLog.some((e) => e.event === 'session-end'), 5000, 'agent ends the session');
+    await new Promise((r) => setTimeout(r, 1200)); // past the 1 s failure delay
+    // The agent is still alive and serving.
+    const d = await connect(stack, 'websocket');
+    await d.app.login('alice', PASSWORD, stack.currentTotp());
+    d.conn.close();
+  } finally {
+    await stack.close();
+  }
+});
+
 test('a TOTP code cannot be replayed in a second session', async () => {
   const stack = await startStack();
   try {

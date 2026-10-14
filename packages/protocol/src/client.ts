@@ -162,7 +162,9 @@ export class ClientConnection extends Emitter<ClientConnectionEvents> {
         case 'error': {
           const err = new RelayError(msg.code, msg.message);
           if (!this.#session) return this.#failOpen(err);
-          this.#session.close(err.message);
+          // Anything else (rate limits, busy) is transient: the relay closes
+          // this socket and we reconnect with backoff.
+          if (msg.code === 'unknown-session' || msg.code === 'session-closed') this.#session.close(err.message);
           return;
         }
       }

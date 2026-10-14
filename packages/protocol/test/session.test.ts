@@ -192,3 +192,43 @@ test('backpressure: bufferedAmount drains once the peer acknowledges', async () 
   await waitFor(() => drained, 3000, 'drain');
   closeAll(a, b);
 });
+
+test('partial messages share one memory budget across all channels', async () => {
+  // A malicious peer interleaves first fragments on many channels and never
+  // finishes them. Honest senders never interleave, so craft records by hand.
+  const { client, agent } = handshakePair();
+  const b = new SecureSession(agent, { ...fast, maxMessageBytes: 64 * 1024 });
+  b.attach(() => {});
+  const closed = new Promise<{ reason: string }>((r) => b.on('close', r));
+  const seal = (seq: number, channel: number, payload: Uint8Array) => {
+    const pt = new Uint8Array(16 + payload.length);
+    pt[0] = 1; // DATA
+    pt[1] = 0x01; // MORE
+    pt[2] = channel;
+    new DataView(pt.buffer).setUint32(12, payload.length);
+    pt.set(payload, 16);
+    const packet = new Uint8Array(9 + pt.length + 16);
+    packet[0] = FRAME_RECORD;
+    new DataView(packet.buffer).setBigUint64(1, BigInt(seq));
+    packet.set(client.send.sealAt(BigInt(seq), packet.subarray(0, 9), pt), 9);
+    return packet;
+  };
+  for (let i = 0; i < 20 && !b.closed; i++) b.receive(seal(i, 10 + i, randomBytes(16 * 1024)));
+  const info = await closed;
+  assert.match(info.reason, /message too large/);
+});
+
+test('the peer cadence flag is ignored until following is enabled', async () => {
+  const cadence = { intervalMs: 20, holdMs: 200, minPlaintext: 256, followPeer: true };
+  const { a, b } = sessionPair({ a: { ...fast, cadence }, b: { ...fast, cadence: { ...cadence, followPeer: false } } });
+  a.markInteractive();
+  a.send(1, utf8('x'));
+  await sleep(80);
+  assert.equal(b.cadenceActive, false, 'not following yet');
+  b.followPeerCadence = true;
+  a.markInteractive();
+  a.send(1, utf8('y'));
+  await sleep(80);
+  assert.equal(b.cadenceActive, true, 'follows once enabled');
+  closeAll(a, b);
+});

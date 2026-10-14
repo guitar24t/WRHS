@@ -40,9 +40,12 @@ export interface AgentContext {
 
 export const AGENT_SESSION_OPTIONS: SessionOptions = {
   highWaterMark: 2 * 1024 * 1024,
+  // Clients only send small control messages and Guacamole instructions.
+  maxMessageBytes: 256 * 1024,
   // While the user types, pace output on a 20 ms grid and pad it, so screen
-  // echoes do not reveal keystroke timing to the proxy.
-  cadence: { intervalMs: 20, holdMs: 1500, minPlaintext: 2048, followPeer: true },
+  // echoes do not reveal keystroke timing to the proxy. Following the
+  // client's cadence is switched on only after login (see #onAuth).
+  cadence: { intervalMs: 20, holdMs: 1500, minPlaintext: 2048, followPeer: false },
 };
 
 type State = 'handshake' | 'auth' | 'ready' | 'remote' | 'closed';
@@ -167,7 +170,7 @@ export class ClientSessionHandler {
   // ------------------------------------------------------------ control
 
   #control(msg: ControlMessage): void {
-    if (this.#session && !this.#session.closed) this.#session.send(CHANNEL_CONTROL, utf8(JSON.stringify(msg)));
+    if (this.#session?.writable) this.#session.send(CHANNEL_CONTROL, utf8(JSON.stringify(msg)));
   }
 
   #onMessage(channel: number, data: Uint8Array): void {
@@ -181,10 +184,10 @@ export class ClientSessionHandler {
     }
     switch (msg.t) {
       case 'auth':
-        void this.#onAuth(msg);
+        this.#onAuth(msg).catch((err: Error) => this.#internalError(err));
         return;
       case 'open':
-        void this.#onOpen(msg);
+        this.#onOpen(msg).catch((err: Error) => this.#internalError(err));
         return;
       default:
         return;
@@ -199,20 +202,29 @@ export class ClientSessionHandler {
     this.#authBusy = true;
     this.#authAttempts++;
     const started = Date.now();
-    const r = await this.#ctx.auth.authenticate(msg.user, msg.password, typeof msg.totp === 'string' ? msg.totp : undefined);
+    const device = this.#session!.remoteStatic;
+    // The device allow-list is checked as part of authentication, so a
+    // correct password from an unenrolled device is an ordinary failure: it
+    // does not reset the failure count, use up the TOTP step, or say why.
+    const deviceAllowed = (name: string) => {
+      const u = this.#ctx.config.users.find((x) => x.name === name);
+      return !u?.deviceKeys?.length || u.deviceKeys.some((k) => safeKeyEq(k, device));
+    };
+    const r = await this.#ctx.auth.authenticate(
+      msg.user,
+      msg.password,
+      typeof msg.totp === 'string' ? msg.totp : undefined,
+      Date.now(),
+      deviceAllowed,
+    );
     let failure: string | null = r.ok ? null : r.message;
-    let user: UserConfig | undefined;
-    if (r.ok) {
-      user = this.#ctx.config.users.find((u) => u.name === r.user);
-      if (!user) failure = 'invalid credentials';
-      else if (user.deviceKeys?.length && !user.deviceKeys.some((k) => safeKeyEq(k, this.#session!.remoteStatic))) {
-        failure = 'this device is not enrolled for this user';
-      }
-    }
+    const user = r.ok ? this.#ctx.config.users.find((u) => u.name === r.user) : undefined;
+    if (r.ok && !user) failure = 'invalid credentials';
     if (this.#state !== 'auth') return; // closed meanwhile
     if (failure !== null) {
       // Flatten timing and slow down guessing.
       await sleep(Math.max(0, 1000 - (Date.now() - started)));
+      if (this.#state !== 'auth') return; // closed or timed out while we slept
       this.#authBusy = false;
       this.#ctx.log('login-fail', { sid: this.sid, user: msg.user, device: this.#device, reason: failure });
       this.#control({ t: 'auth-fail', message: failure, ...(r.ok ? {} : r.retryAfterMs ? { retryAfterMs: r.retryAfterMs } : {}) });
@@ -222,8 +234,14 @@ export class ClientSessionHandler {
     this.#authBusy = false;
     this.#user = user!;
     this.#state = 'ready';
+    this.#session!.followPeerCadence = true;
     this.#ctx.log('login-ok', { sid: this.sid, user: user!.name, device: this.#device });
     this.#control({ t: 'auth-ok', targets: this.#targetsFor(user!).map(targetInfo) });
+  }
+
+  #internalError(err: Error): void {
+    this.#ctx.log('internal-error', { sid: this.sid, error: err.message });
+    this.end('internal error');
   }
 
   #targetsFor(user: UserConfig): TargetConfig[] {
@@ -275,7 +293,7 @@ export class ClientSessionHandler {
 
   #toClient(chunk: Buffer): void {
     const s = this.#session;
-    if (!s || s.closed) return;
+    if (!s?.writable) return;
     s.send(CHANNEL_GUAC, new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
     if (s.bufferedAmount > s.highWaterMark) this.#guac?.pause();
   }

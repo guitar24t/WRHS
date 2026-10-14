@@ -37,8 +37,10 @@ export interface RelayOptions {
   maxSessionsPerAgent?: number;
   sessionGraceMs?: number;
   longPollWaitMs?: number;
-  /** Max session opens per client IP per minute. */
+  /** Max session opens (and resumes) per client IP per minute. */
   opensPerMinute?: number;
+  /** Max concurrent sessions opened from one client IP. */
+  maxSessionsPerIp?: number;
   trustProxy?: boolean;
   log?: (event: string, fields?: Record<string, unknown>) => void;
 }
@@ -50,6 +52,9 @@ type ClientAttachment =
 interface RelaySession {
   sid: string;
   agentId: string;
+  ip: string;
+  /** Serializes long-poll uploads so they can wait for the agent link to drain. */
+  txChain: Promise<void>;
   client: ClientAttachment | null;
   agent: WebSocket | null;
   clientGoneAt: number | null;
@@ -81,7 +86,8 @@ export function createRelay(opts: RelayOptions): Relay {
   const maxSessionsPerAgent = opts.maxSessionsPerAgent ?? 32;
   const graceMs = opts.sessionGraceMs ?? 120_000;
   const lpWaitMs = opts.longPollWaitMs ?? 25_000;
-  const opensPerMinute = opts.opensPerMinute ?? 60;
+  const opensPerMinute = opts.opensPerMinute ?? 30;
+  const maxSessionsPerIp = opts.maxSessionsPerIp ?? 16;
 
   const agents = new Map<string, AgentControl>();
   const sessions = new Map<string, RelaySession>();
@@ -226,11 +232,18 @@ export function createRelay(opts: RelayOptions): Relay {
     const ctl = agents.get(agentId);
     if (!ctl) return { error: 'agent-offline', message: 'the agent is not connected to this relay' };
     let count = 0;
-    for (const s of sessions.values()) if (s.agentId === agentId) count++;
+    let fromIp = 0;
+    for (const s of sessions.values()) {
+      if (s.agentId === agentId) count++;
+      if (s.ip === ip) fromIp++;
+    }
     if (count >= maxSessionsPerAgent) return { error: 'busy', message: 'too many sessions for this agent' };
+    if (fromIp >= maxSessionsPerIp) return { error: 'rate-limited', message: 'too many sessions from this address' };
     const s: RelaySession = {
       sid: newSid(),
       agentId,
+      ip,
+      txChain: Promise.resolve(),
       client: null,
       agent: null,
       clientGoneAt: null,
@@ -353,6 +366,7 @@ export function createRelay(opts: RelayOptions): Relay {
         if (typeof body.sid === 'string') {
           s = sessions.get(body.sid);
           if (!s) return json(res, 404, { error: 'unknown-session' });
+          if (!allowOpen(clientIp(req))) return json(res, 429, { error: 'rate-limited' });
         } else {
           const r = createSession(String(body.agent ?? ''), clientIp(req));
           if ('error' in r) return json(res, r.error === 'rate-limited' ? 429 : r.error === 'agent-offline' ? 404 : 400, r);
@@ -370,8 +384,23 @@ export function createRelay(opts: RelayOptions): Relay {
       if (c?.kind !== 'lp') return json(res, 409, { error: 'not-attached' });
 
       if (m[2] === 'tx') {
-        const frames = decodeFrameBatch(new Uint8Array(await readBody(req, LP_MAX_BODY)));
-        for (const f of frames) sendToAgent(s, f);
+        // Uploads are serialized per session and wait (unread, so TCP pushes
+        // back on the sender) until the agent link has drained.
+        const turn = s.txChain.then(async () => {
+          const deadline = Date.now() + 15_000;
+          while ((s.agent?.bufferedAmount ?? 0) > HIGH_WATER) {
+            if (Date.now() > deadline || res.destroyed) throw new Error('agent link congested');
+            await new Promise((r) => setTimeout(r, 25));
+          }
+          const frames = decodeFrameBatch(new Uint8Array(await readBody(req, LP_MAX_BODY)));
+          for (const f of frames) sendToAgent(s, f);
+        });
+        s.txChain = turn.catch(() => {});
+        try {
+          await turn;
+        } catch (err) {
+          return json(res, 503, { error: 'busy', message: (err as Error).message });
+        }
         res.statusCode = 204;
         res.end();
         return;
@@ -427,11 +456,25 @@ export function createRelay(opts: RelayOptions): Relay {
   // ------------------------------------------------------------ WebSockets
 
   server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const url = new URL(req.url ?? '/', 'http://relay');
-    const path = url.pathname;
+    socket.on('error', () => socket.destroy());
+    try {
+      onUpgrade(req, socket, head);
+    } catch {
+      socket.destroy();
+    }
+  });
+
+  function onUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
     const reject = (code: number, msg: string) => {
       socket.end(`HTTP/1.1 ${code} ${msg}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     };
+    let url: URL;
+    try {
+      url = new URL(req.url ?? '/', 'http://relay');
+    } catch {
+      return reject(400, 'Bad Request');
+    }
+    const path = url.pathname;
 
     if (path === '/v1/client/ws') {
       wss.handleUpgrade(req, socket, head, (ws) => onClientSocket(ws, url, clientIp(req)));
@@ -455,7 +498,7 @@ export function createRelay(opts: RelayOptions): Relay {
     }
 
     reject(404, 'Not Found');
-  });
+  }
 
   function keepAlive(ws: WebSocket): void {
     // Some proxies kill connections that are idle for 30-60 s.
@@ -474,6 +517,11 @@ export function createRelay(opts: RelayOptions): Relay {
       s = sessions.get(sid);
       if (!s) {
         ws.send(relayFrame({ t: 'error', code: 'unknown-session' }));
+        ws.close(1000);
+        return;
+      }
+      if (!allowOpen(ip)) {
+        ws.send(relayFrame({ t: 'error', code: 'rate-limited', message: 'too many reconnects' }));
         ws.close(1000);
         return;
       }

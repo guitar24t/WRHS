@@ -8,6 +8,9 @@
 //   RELAY_OPEN_REGISTRATION=1     accept any agent (development only!)
 //   RELAY_HOSTED_CLIENT=path      serve the hosted web client at / (convenience mode)
 //   RELAY_TRUST_PROXY=1           use X-Forwarded-For for rate limiting
+//   RELAY_OPENS_PER_MINUTE=30     session opens + resumes per client IP per minute
+//   RELAY_MAX_SESSIONS_PER_IP=16  concurrent sessions per client IP
+//   RELAY_MAX_SESSIONS_PER_AGENT=32
 
 import { readFileSync } from 'node:fs';
 import { createRelay } from './relay.ts';
@@ -28,6 +31,14 @@ function loadAgentTokens(): Map<string, Buffer> | null {
   return map;
 }
 
+function intEnv<K extends string>(name: string, key: K): Partial<Record<K, number>> {
+  const v = process.env[name];
+  if (v === undefined || v === '') return {};
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`${name} must be a positive integer`);
+  return { [key]: n } as Partial<Record<K, number>>;
+}
+
 const tlsCert = process.env.RELAY_TLS_CERT;
 const tlsKey = process.env.RELAY_TLS_KEY;
 
@@ -36,6 +47,9 @@ const relay = createRelay({
   tls: tlsCert && tlsKey ? { cert: tlsCert, key: tlsKey } : null,
   hostedClientFile: process.env.RELAY_HOSTED_CLIENT || null,
   trustProxy: process.env.RELAY_TRUST_PROXY === '1',
+  ...intEnv('RELAY_OPENS_PER_MINUTE', 'opensPerMinute'),
+  ...intEnv('RELAY_MAX_SESSIONS_PER_IP', 'maxSessionsPerIp'),
+  ...intEnv('RELAY_MAX_SESSIONS_PER_AGENT', 'maxSessionsPerAgent'),
   log: (event, fields) => console.log(JSON.stringify({ time: new Date().toISOString(), event, ...fields })),
 });
 

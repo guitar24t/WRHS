@@ -45,6 +45,9 @@ settings, all environment variables:
 | `RELAY_AGENTS_FILE` | JSON map `{agentId: sha256(relayToken)}` of agents allowed to register |
 | `RELAY_TLS_CERT` / `RELAY_TLS_KEY` | Terminate TLS in the relay itself instead of behind Caddy |
 | `RELAY_TRUST_PROXY=1` | Use `X-Forwarded-For` from your reverse proxy for rate limiting |
+| `RELAY_OPENS_PER_MINUTE` | Session opens and resumes per client IP per minute (default 30) |
+| `RELAY_MAX_SESSIONS_PER_IP` | Concurrent sessions per client IP (default 16). Raise it if many users share one proxy egress IP. |
+| `RELAY_MAX_SESSIONS_PER_AGENT` | Concurrent sessions per agent (default 32) |
 | `RELAY_HOSTED_CLIENT` | Path to `hosted.html`, to serve the convenience client at `/` |
 | `RELAY_OPEN_REGISTRATION=1` | Accept any agent. **Development only.** |
 

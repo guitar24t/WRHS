@@ -149,7 +149,6 @@ export class SecureSession extends Emitter<SessionEvents> {
   #rto: number;
   #srtt: number | null = null;
   #rttvar = 0;
-  #lastFastRetransmit = 0;
 
   // Receiving side.
   #recvNext = 0;
@@ -158,7 +157,7 @@ export class SecureSession extends Emitter<SessionEvents> {
   #ackTimer: ReturnType<typeof setTimeout> | null = null;
   #ackTimerDue = 0;
   #partial = new Map<number, Uint8Array[]>();
-  #partialBytes = new Map<number, number>();
+  #partialBytes = 0;
   /** Authenticated records that arrived ahead of a gap, keyed by sequence number. */
   #reorder = new Map<number, Uint8Array>();
   #reorderBytes = 0;
@@ -171,6 +170,8 @@ export class SecureSession extends Emitter<SessionEvents> {
   // Timing obfuscation.
   #cadenceTimer: ReturnType<typeof setInterval> | null = null;
   #cadenceUntil = 0;
+  #followPeer: boolean;
+  #lastRetransmitAll = 0;
   /** Until when *local* interaction keeps cadence on; only then do we ask the peer to follow. */
   #localInteractiveUntil = 0;
 
@@ -189,6 +190,7 @@ export class SecureSession extends Emitter<SessionEvents> {
     const { cadence, ...rest } = options;
     this.#o = { ...DEFAULTS, ...stripUndefined(rest) };
     this.#cadence = cadence ?? null;
+    this.#followPeer = this.#cadence?.followPeer ?? false;
     this.#rto = this.#o.initialRtoMs;
     if (this.#o.maxRecordPayload + PLAINTEXT_HEADER > MAX_PLAINTEXT) throw new Error('maxRecordPayload too large');
     this.#pingTimer = weakInterval(() => this.#onPingTimer(), this.#o.pingIntervalMs);
@@ -196,6 +198,20 @@ export class SecureSession extends Emitter<SessionEvents> {
 
   get closed(): boolean {
     return this.#closed;
+  }
+
+  /** False once closed or closing; send() throws then. */
+  get writable(): boolean {
+    return !this.#closed && !this.#closing;
+  }
+
+  /**
+   * Whether a peer's CADENCE flag switches our cadence on. The agent keeps
+   * this off until the user has logged in, so an unauthenticated peer
+   * cannot make it generate chaff.
+   */
+  set followPeerCadence(on: boolean) {
+    this.#followPeer = on;
   }
 
   get attached(): boolean {
@@ -236,7 +252,7 @@ export class SecureSession extends Emitter<SessionEvents> {
   /** Retransmit every unacknowledged record and tell the peer what we have. */
   resync(): void {
     if (this.#closed || !this.#link) return;
-    this.#retransmitAll();
+    this.#retransmitAll(true);
     this.#sendUnreliable(KIND_ACK, 0, new Uint8Array(0));
   }
 
@@ -365,7 +381,7 @@ export class SecureSession extends Emitter<SessionEvents> {
     if (this.#closed) return;
     // Following does not set FLAG_CADENCE on our records, so two followers
     // cannot keep each other ticking forever.
-    if (flags & FLAG_CADENCE && this.#cadence?.followPeer) this.#startCadence();
+    if (flags & FLAG_CADENCE && this.#followPeer) this.#startCadence();
 
     if (reliable) {
       switch (kind) {
@@ -407,18 +423,19 @@ export class SecureSession extends Emitter<SessionEvents> {
   #onData(channel: number, flags: number, payload: Uint8Array): void {
     const parts = this.#partial.get(channel);
     if (flags & FLAG_MORE || parts) {
-      const total = (this.#partialBytes.get(channel) ?? 0) + payload.length;
-      if (total > this.#o.maxMessageBytes) return this.#fail(new Error('message too large'));
+      // One budget for all partially received messages, whatever the channel.
+      this.#partialBytes += payload.length;
+      if (this.#partialBytes > this.#o.maxMessageBytes) return this.#fail(new Error('message too large'));
       const list = parts ?? [];
       list.push(payload.slice());
       if (flags & FLAG_MORE) {
         this.#partial.set(channel, list);
-        this.#partialBytes.set(channel, total);
         return;
       }
       this.#partial.delete(channel);
-      this.#partialBytes.delete(channel);
-      this.#deliver(channel, concat(...list));
+      const msg = concat(...list);
+      this.#partialBytes -= msg.length;
+      this.#deliver(channel, msg);
       return;
     }
     this.#deliver(channel, payload.slice());
@@ -457,11 +474,7 @@ export class SecureSession extends Emitter<SessionEvents> {
       if (this.#closing && !outstanding) this.#finish({ reason: 'closed', remote: false });
     } else if (gapReport && outstanding) {
       // Peer saw a gap: go back N now instead of waiting for the RTO.
-      const guard = Math.max(200, this.#srtt ?? 200);
-      if (now - this.#lastFastRetransmit >= guard) {
-        this.#lastFastRetransmit = now;
-        this.#retransmitAll();
-      }
+      this.#retransmitAll(true);
     }
   }
 
@@ -497,8 +510,15 @@ export class SecureSession extends Emitter<SessionEvents> {
     this.#restartRto();
   }
 
-  #retransmitAll(): void {
+  /**
+   * Go back N. Peer-triggered retransmissions (gap reports, reattaches) are
+   * limited to one per round trip, so a peer cannot use them to amplify.
+   */
+  #retransmitAll(peerTriggered = false): void {
     if (!this.#link) return;
+    const now = Date.now();
+    if (peerTriggered && now - this.#lastRetransmitAll < Math.max(200, this.#srtt ?? 200)) return;
+    this.#lastRetransmitAll = now;
     for (let i = this.#inflightHead; i < this.#inflight.length; i++) {
       const r = this.#inflight[i]!;
       r.retransmitted = true;
@@ -534,7 +554,7 @@ export class SecureSession extends Emitter<SessionEvents> {
     if (this.#closed) return;
     if (this.#queue.length > 0) {
       this.#flush(true);
-    } else if (Date.now() < this.#cadenceUntil) {
+    } else if (Date.now() < this.#cadenceUntil && this.#inflightBytes < this.#o.highWaterMark) {
       this.#sendReliable(KIND_NOOP, this.#cadenceFlag(), 0, new Uint8Array(0), this.#cadence!.minPlaintext);
     } else if (this.#cadenceTimer) {
       clearInterval(this.#cadenceTimer);

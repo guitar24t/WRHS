@@ -33,7 +33,7 @@ export function createEncryptedTunnel(app: AppChannel): GuacTunnel {
     tunnel.setState(Guacamole.Tunnel.State.CLOSED);
   };
   tunnel.sendMessage = (...elements: unknown[]) => {
-    if (tunnel.state !== Guacamole.Tunnel.State.OPEN || elements.length === 0 || app.session.closed) return;
+    if (tunnel.state !== Guacamole.Tunnel.State.OPEN || elements.length === 0 || !app.session.writable) return;
     app.sendGuac(Guacamole.Parser.toInstruction(elements));
   };
   return tunnel;
