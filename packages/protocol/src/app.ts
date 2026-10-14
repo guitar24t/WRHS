@@ -5,14 +5,17 @@
 import { Emitter } from './emitter.ts';
 import { fromUtf8, utf8 } from './bytes.ts';
 import type { SecureSession } from './session.ts';
-import { CHANNEL_CONTROL, CHANNEL_GUAC, type ControlMessage, type TargetInfo } from './wire.ts';
+import { CHANNEL_CONTROL, CHANNEL_GUAC, type ControlMessage, type SessionLimits, type TargetInfo } from './wire.ts';
 
 export class AuthError extends Error {
   readonly retryAfterMs: number | undefined;
-  constructor(message: string, retryAfterMs?: number) {
+  /** Sign-in attempts left before the agent closes this connection. */
+  readonly attemptsLeft: number | undefined;
+  constructor(message: string, retryAfterMs?: number, attemptsLeft?: number) {
     super(message);
     this.name = 'AuthError';
     this.retryAfterMs = retryAfterMs;
+    this.attemptsLeft = attemptsLeft;
   }
 }
 
@@ -24,6 +27,10 @@ export type AppEvents = {
 export class AppChannel extends Emitter<AppEvents> {
   readonly session: SecureSession;
   #authRequired: Extract<ControlMessage, { t: 'auth-required' }> | null = null;
+  /** Limits the agent announced at sign-in, if any. */
+  limits: SessionLimits | null = null;
+  /** Reference of the most recent open request (replies and "closed" carry it). */
+  lastOpenRef = 0;
 
   constructor(session: SecureSession) {
     super();
@@ -50,14 +57,18 @@ export class AppChannel extends Emitter<AppEvents> {
     this.session.send(CHANNEL_GUAC, typeof instruction === 'string' ? utf8(instruction) : instruction);
   }
 
-  waitFor<T extends ControlMessage['t']>(types: T[], timeoutMs = 30_000): Promise<Extract<ControlMessage, { t: T }>> {
+  waitFor<T extends ControlMessage['t']>(
+    types: T[],
+    timeoutMs = 30_000,
+    match: (m: Extract<ControlMessage, { t: T }>) => boolean = () => true,
+  ): Promise<Extract<ControlMessage, { t: T }>> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         cleanup();
         reject(new Error(`timed out waiting for ${types.join('/')}`));
       }, timeoutMs);
       const offMsg = this.on('control', (m) => {
-        if ((types as string[]).includes(m.t)) {
+        if ((types as string[]).includes(m.t) && match(m as Extract<ControlMessage, { t: T }>)) {
           cleanup();
           resolve(m as Extract<ControlMessage, { t: T }>);
         }
@@ -85,14 +96,23 @@ export class AppChannel extends Emitter<AppEvents> {
     const reply = this.waitFor(['auth-ok', 'auth-fail']);
     this.sendControl({ t: 'auth', user, password, ...(totp ? { totp } : {}) });
     const r = await reply;
-    if (r.t === 'auth-fail') throw new AuthError(r.message, r.retryAfterMs);
+    if (r.t === 'auth-fail') throw new AuthError(r.message, r.retryAfterMs, r.attemptsLeft);
+    this.limits = r.limits ?? null;
     return r.targets;
   }
 
-  async open(req: Omit<Extract<ControlMessage, { t: 'open' }>, 't'>): Promise<void> {
-    const reply = this.waitFor(['open-ok', 'open-fail']);
-    this.sendControl({ t: 'open', ...req });
+  /** Open a desktop; resolves with the request reference once the agent has connected. */
+  async open(req: Omit<Extract<ControlMessage, { t: 'open' }>, 't' | 'ref'>): Promise<number> {
+    const ref = ++this.lastOpenRef;
+    const reply = this.waitFor(['open-ok', 'open-fail'], 30_000, (m) => m.ref === undefined || m.ref === ref);
+    this.sendControl({ t: 'open', ...req, ref });
     const r = await reply;
     if (r.t === 'open-fail') throw new Error(r.message);
+    return ref;
+  }
+
+  /** Close the current desktop without signing out. */
+  closeDesktop(): void {
+    if (this.session.writable) this.sendControl({ t: 'close-desktop' });
   }
 }

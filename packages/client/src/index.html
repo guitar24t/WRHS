@@ -2,67 +2,123 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta http-equiv="Content-Security-Policy" content="__CSP__">
 <meta name="referrer" content="no-referrer">
 <title>WRHS Remote Desktop</title>
 <style>
   :root {
-    --bg: #f5f6f8; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --border: #d9dde5;
-    --accent: #2457d6; --accent-text: #ffffff; --ok: #12805c; --warn: #9a6400; --bad: #b42318;
-    --ok-bg: #e7f6ef; --warn-bg: #fff4dc; --bad-bg: #fdecea;
+    --bg: #f5f6f8; --panel: #ffffff; --text: #1d2330; --muted: #566070; --border: #d9dde5;
+    --accent: #2457d6; --accent-text: #ffffff;
+    --ok: #0b6b47; --ok-bg: #e3f4ea; --warn: #7a4a00; --warn-bg: #fdf0d5;
+    --bad: #a3190f; --bad-bg: #fde8e6; --info: #1f4fbf; --info-bg: #e8effd;
+    --overlay: rgba(10, 12, 18, .72);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #12151b; --panel: #1b1f27; --text: #e6e9ef; --muted: #9aa3b2; --border: #2e3440;
-      --accent: #6b8cff; --accent-text: #0b0d12; --ok: #4ccf97; --warn: #f0b545; --bad: #ff6b5f;
-      --ok-bg: #12291f; --warn-bg: #2d2412; --bad-bg: #331614;
+      --accent: #6b8cff; --accent-text: #0b0d12;
+      --ok: #5fd9a3; --ok-bg: #12291f; --warn: #f2bd5a; --warn-bg: #2d2412;
+      --bad: #ff8a7f; --bad-bg: #3a1714; --info: #9db5ff; --info-bg: #18223d;
     }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
     font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   body { display: flex; flex-direction: column; }
-  header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--panel);
-    border-bottom: 1px solid var(--border); white-space: nowrap; min-width: 0; }
-  header #details { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-  #device { margin: 16px 0 0; }
+
+  header { display: flex; align-items: center; gap: 10px; padding: 8px 16px; background: var(--panel);
+    border-bottom: 1px solid var(--border); white-space: nowrap; min-width: 0; position: relative; }
   header .brand { font-weight: 700; letter-spacing: .02em; }
   .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
-    font-size: 13px; background: var(--warn-bg); color: var(--warn); }
+    font-size: 13px; background: var(--warn-bg); color: var(--warn); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .badge.ok { background: var(--ok-bg); color: var(--ok); }
   .badge.bad { background: var(--bad-bg); color: var(--bad); }
-  .badge svg { width: 14px; height: 14px; }
-  .meta { color: var(--muted); font-size: 13px; }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none; }
   .spacer { flex: 1; }
-  main { flex: 1; display: flex; min-height: 0; }
+  .link-btn { background: none; border: 1px solid transparent; color: var(--muted); padding: 4px 8px; font-size: 13px; }
+  .link-btn:hover, .link-btn[aria-expanded="true"] { color: var(--text); border-color: var(--border); }
+  #details-panel { position: absolute; top: calc(100% + 6px); left: 16px; z-index: 20; width: min(460px, calc(100vw - 32px));
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.18); white-space: normal; }
+  #details-panel h2 { font-size: 14px; margin: 0 0 8px; }
+
+  main { flex: 1; display: flex; min-height: 0; position: relative; }
   .view { margin: auto; width: min(440px, calc(100% - 32px)); background: var(--panel); border: 1px solid var(--border);
     border-radius: 12px; padding: 24px; }
   .view h1 { font-size: 20px; margin: 0 0 4px; }
+  .view h1:focus { outline: none; }
   .view p.sub { margin: 0 0 18px; color: var(--muted); }
   label { display: block; font-size: 13px; color: var(--muted); margin: 12px 0 4px; }
   input { width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
     color: var(--text); font: inherit; }
-  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input:focus-visible, button:focus-visible, #display:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  input[aria-invalid="true"] { border-color: var(--bad); }
+  .hint { font-size: 13px; color: var(--muted); margin: 6px 0 0; overflow-wrap: anywhere; }
   button { font: inherit; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text);
     padding: 8px 14px; cursor: pointer; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); width: 100%; margin-top: 18px; padding: 10px; }
+  button.secondary { width: 100%; margin-top: 18px; padding: 10px; }
   button:disabled { opacity: .6; cursor: default; }
-  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 14px; }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; font-size: 14px; margin: 0; }
   .kv dt { color: var(--muted); }
   .kv dd { margin: 0; overflow-wrap: anywhere; }
-  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
   .msg { margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 14px; }
+  .msg:empty { display: none; }
   .msg.error { background: var(--bad-bg); color: var(--bad); }
   .msg.warn { background: var(--warn-bg); color: var(--warn); }
+  .msg.info { background: var(--info-bg); color: var(--info); }
+  details.device { margin-top: 18px; font-size: 13px; color: var(--muted); }
+  details.device summary { cursor: pointer; }
   .targets { list-style: none; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; }
-  .targets button { width: 100%; text-align: left; padding: 12px; }
-  .targets .proto { float: right; color: var(--muted); font-size: 12px; text-transform: uppercase; }
-  #remote { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-  #toolbar { display: flex; gap: 8px; padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
-  #display { flex: 1; position: relative; overflow: hidden; background: #000; outline: none; }
-  #display > div { position: absolute; left: 0; top: 0; }
+  .targets button { width: 100%; text-align: left; padding: 12px; display: flex; gap: 10px; align-items: center; }
+  .targets button .name { flex: 1; }
+  .targets button[aria-pressed="true"] { border-color: var(--accent); outline: 1px solid var(--accent); }
+  .targets .proto { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  #rdp-creds { margin-top: 16px; padding-top: 4px; border-top: 1px solid var(--border); }
+  #rdp-creds .row button { margin-top: 18px; }
+
+  #remote { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+  #toolbar { display: flex; gap: 8px; padding: 6px 12px; background: var(--panel); border-bottom: 1px solid var(--border);
+    overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+  #toolbar button { flex: none; display: inline-flex; align-items: center; gap: 6px; }
+  #toolbar .icon { width: 16px; height: 16px; }
+  #stage { flex: 1; position: relative; display: flex; min-height: 0; }
+  /* The Guacamole display element is the scaled desktop; centre it. */
+  #display { flex: 1; position: relative; overflow: hidden; background: #000; outline: none; touch-action: none;
+    display: flex; align-items: center; justify-content: center; }
+  #display > div { flex: none; }
+  .overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px;
+    background: var(--overlay); color: #fff; z-index: 5; pointer-events: none; text-align: center; }
+  .overlay .card { max-width: 420px; }
+  .overlay .card strong { display: block; font-size: 17px; margin-bottom: 4px; }
+  .spinner { width: 28px; height: 28px; border-radius: 50%; border: 3px solid rgba(255,255,255,.3); border-top-color: #fff;
+    margin: 0 auto 12px; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+  #session-banner, #toast { position: absolute; left: 50%; transform: translateX(-50%); z-index: 30; width: max-content;
+    max-width: calc(100% - 24px); border-radius: 8px; padding: 8px 14px; font-size: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.3); }
+  #session-banner { top: 56px; background: var(--warn-bg); color: var(--warn); }
+  #toast { bottom: 16px; background: var(--info-bg); color: var(--info); pointer-events: none; }
+  /* Off-screen field that receives phone/tablet keyboard input. */
+  #soft-kbd { position: absolute; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0;
+    resize: none; font-size: 16px; }
   #hosted-banner { background: var(--warn-bg); color: var(--warn); padding: 8px 16px; font-size: 14px; }
+  #toolbar .touch-only { display: none; }
+  @media (pointer: coarse) { #toolbar .touch-only { display: inline-flex; } }
+  @media (max-width: 600px) {
+    header { padding: 6px 10px; gap: 6px; }
+    .badge .long { display: none; }
+    #toolbar { padding: 6px 8px; gap: 6px; }
+    #toolbar button { padding: 6px 8px; font-size: 14px; }
+    #toolbar .long { display: none; }
+    .view { padding: 20px; }
+  }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -70,81 +126,123 @@
 <script id="wrhs-config" type="application/json">__CONFIG__</script>
 <header>
   <span class="brand">WRHS</span>
-  <span id="security" class="badge"><span id="security-text">Not connected</span></span>
-  <span id="details" class="meta"></span>
+  <span id="security" class="badge" role="status"><span class="dot" aria-hidden="true"></span><span id="security-text">Not connected</span></span>
+  <button id="details-btn" class="link-btn" type="button" aria-expanded="false" aria-controls="details-panel" hidden>Details</button>
+  <span class="spacer"></span>
+  <button id="signout-btn" class="link-btn" type="button" hidden>Sign out</button>
+  <div id="details-panel" role="dialog" aria-label="Connection details" hidden>
+    <h2>Connection details</h2>
+    <dl class="kv">
+      <dt>Agent</dt><dd id="d-agent"></dd>
+      <dt>Agent key</dt><dd id="d-fp" class="mono"></dd>
+      <dt>Encryption</dt><dd>Noise XXhfs: X25519 + ML-KEM-768 (post-quantum hybrid), ChaCha20-Poly1305</dd>
+      <dt>Transport</dt><dd id="d-transport"></dd>
+      <dt>Round trip</dt><dd id="d-rtt"></dd>
+      <dt>This device</dt><dd id="d-device" class="mono"></dd>
+    </dl>
+  </div>
 </header>
-<div id="hosted-banner" hidden>
+<div id="hosted-banner" role="note" hidden>
   You opened this page from the relay server. A proxy that actively rewrites web pages could have altered it,
   so this mode only protects against passive inspection. For full protection, use the offline launcher file.
 </div>
 <main>
-  <section id="view-connect" class="view">
-    <h1>Connect to your desktop</h1>
-    <p class="sub">Traffic is encrypted end to end between this page and your agent. Proxies only see ciphertext.</p>
+  <div id="session-banner" role="alert" hidden></div>
+  <div id="toast" role="status" hidden></div>
+  <section id="view-connect" class="view" aria-labelledby="connect-title">
+    <h1 id="connect-title" tabindex="-1">Connect to your desktop</h1>
+    <p class="sub">Everything is encrypted between this page and your agent. Network proxies only see scrambled data.</p>
     <dl id="profile" class="kv" hidden>
       <dt>Agent</dt><dd id="profile-name"></dd>
       <dt>Relay</dt><dd id="profile-relay"></dd>
-      <dt>Fingerprint</dt><dd id="profile-fp" class="mono"></dd>
+      <dt>Agent key</dt><dd id="profile-fp" class="mono"></dd>
     </dl>
-    <form id="manual" hidden>
-      <label for="relay-url">Relay URL</label>
-      <input id="relay-url" type="url" placeholder="https://relay.example.com" required>
-      <label for="agent-key">Agent public key</label>
-      <input id="agent-key" class="mono" placeholder="base64url key printed by wrhs-agent init" required autocomplete="off" spellcheck="false">
+    <form id="connect-form" novalidate>
+      <div id="manual" hidden>
+        <label for="relay-url">Relay address</label>
+        <input id="relay-url" type="url" placeholder="https://relay.example.com" autocomplete="url" aria-describedby="connect-msg">
+        <label for="agent-key">Agent public key</label>
+        <input id="agent-key" class="mono" placeholder="43 characters, from wrhs-agent show" autocomplete="off" spellcheck="false"
+          autocapitalize="off" aria-describedby="agent-key-fp connect-msg">
+        <p id="agent-key-fp" class="hint" aria-live="polite"></p>
+      </div>
+      <button id="connect-btn" class="primary" type="submit">Connect</button>
     </form>
-    <button id="connect-btn" class="primary" type="button">Connect</button>
-    <div id="connect-msg" class="msg" hidden></div>
-    <p id="device" class="meta"></p>
+    <div id="connect-msg" class="msg" role="alert"></div>
+    <details class="device">
+      <summary>Device ID</summary>
+      <p id="device" class="mono"></p>
+      <p>Your administrator may ask for this to allow sign-ins only from this browser.</p>
+    </details>
   </section>
 
-  <section id="view-login" class="view" hidden>
-    <h1>Sign in</h1>
-    <p class="sub">Your credentials travel only inside the encrypted tunnel.</p>
-    <form id="login-form">
+  <section id="view-login" class="view" aria-labelledby="login-title" hidden>
+    <h1 id="login-title" tabindex="-1">Sign in</h1>
+    <p class="sub">Your password and code are sent only inside the encrypted connection.</p>
+    <form id="login-form" novalidate>
       <label for="user">User name</label>
-      <input id="user" autocomplete="username" required>
+      <input id="user" autocomplete="username" autocapitalize="off" spellcheck="false" required>
       <label for="password">Password</label>
       <input id="password" type="password" autocomplete="current-password" required>
       <div id="totp-row">
         <label for="totp">Authenticator code</label>
-        <input id="totp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code">
+        <input id="totp" inputmode="numeric" autocomplete="one-time-code" maxlength="7" pattern="[0-9]{3} ?[0-9]{3}"
+          placeholder="6 digits" aria-describedby="login-msg">
       </div>
-      <button class="primary" type="submit">Sign in</button>
+      <button id="login-btn" class="primary" type="submit">Sign in</button>
     </form>
-    <div id="login-msg" class="msg error" hidden></div>
+    <div id="login-msg" class="msg" role="alert"></div>
   </section>
 
-  <section id="view-targets" class="view" hidden>
-    <h1>Choose a desktop</h1>
+  <section id="view-targets" class="view" aria-labelledby="targets-title" hidden>
+    <h1 id="targets-title" tabindex="-1">Choose a desktop</h1>
+    <div id="targets-msg" class="msg" role="status"></div>
+    <button id="reopen-btn" class="secondary" type="button" hidden></button>
     <ul id="target-list" class="targets"></ul>
     <form id="rdp-creds" hidden>
-      <p class="sub" style="margin-top:16px">Windows credentials for <strong id="creds-target"></strong></p>
+      <p class="sub">Windows sign-in for <strong id="creds-target"></strong></p>
       <label for="rdp-user">User name</label>
-      <input id="rdp-user" autocomplete="off">
-      <label for="rdp-domain">Domain (optional)</label>
-      <input id="rdp-domain" autocomplete="off">
+      <input id="rdp-user" autocomplete="off" autocapitalize="off" spellcheck="false" required>
       <label for="rdp-pass">Password</label>
       <input id="rdp-pass" type="password" autocomplete="off">
-      <button class="primary" type="submit">Connect</button>
+      <label for="rdp-domain">Domain (optional)</label>
+      <input id="rdp-domain" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="row">
+        <button id="creds-cancel" type="button">Cancel</button>
+        <button class="primary" type="submit">Connect</button>
+      </div>
     </form>
-    <div id="targets-msg" class="msg" hidden></div>
   </section>
 
-  <section id="view-closed" class="view" hidden>
-    <h1 id="closed-title">Disconnected</h1>
-    <div id="closed-msg" class="msg"></div>
-    <button id="reconnect-btn" class="primary" type="button">Start over</button>
+  <section id="view-closed" class="view" aria-labelledby="closed-title" hidden>
+    <h1 id="closed-title" tabindex="-1">Disconnected</h1>
+    <div id="closed-msg" class="msg" role="alert"></div>
+    <button id="reconnect-btn" class="primary" type="button">Connect again</button>
   </section>
 
-  <section id="remote" hidden>
-    <div id="toolbar">
-      <button id="cad-btn" type="button" title="Send Ctrl+Alt+Del">Ctrl+Alt+Del</button>
-      <button id="paste-btn" type="button" title="Send your clipboard text to the remote desktop">Send clipboard</button>
-      <button id="full-btn" type="button">Full screen</button>
+  <section id="remote" aria-labelledby="remote-title" hidden>
+    <h1 id="remote-title" class="sr-only" tabindex="-1">Remote desktop</h1>
+    <div id="toolbar" role="toolbar" aria-label="Remote desktop controls">
+      <button id="cad-btn" type="button" title="Send Ctrl+Alt+Del to the remote computer">Ctrl+Alt+Del</button>
+      <button id="paste-btn" type="button" title="Send text from your clipboard to the remote computer">Paste<span class="long"> text</span></button>
+      <button id="kbd-btn" class="touch-only" type="button">Keyboard</button>
+      <button id="full-btn" type="button" aria-label="Full screen"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6"/></svg><span id="full-label" class="long">Full screen</span></button>
       <span class="spacer"></span>
-      <button id="disconnect-btn" type="button">Disconnect</button>
+      <button id="close-desktop-btn" type="button" title="Close this desktop and return to the list">Close<span class="long"> desktop</span></button>
     </div>
-    <div id="display" tabindex="0"></div>
+    <div id="stage">
+      <div id="display" tabindex="0" role="application" aria-label="Remote desktop. Keyboard input goes to the remote computer."></div>
+      <div id="loading-overlay" class="overlay" hidden>
+        <div class="card" role="status"><div class="spinner" aria-hidden="true"></div><strong id="loading-text">Starting the remote desktop…</strong></div>
+      </div>
+      <div id="reconnect-overlay" class="overlay" hidden>
+        <div class="card" role="status"><div class="spinner" aria-hidden="true"></div>
+          <strong>Connection interrupted. Reconnecting…</strong>
+          <span>Your session is kept on the agent. Anything you type will be sent when the connection is back.</span>
+        </div>
+      </div>
+    </div>
+    <textarea id="soft-kbd" aria-label="On-screen keyboard input" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
   </section>
 </main>
 <script>__SCRIPT__</script>

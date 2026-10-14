@@ -86,8 +86,8 @@ export interface ClientHello {
 export type ControlMessage =
   | { t: 'auth-required'; methods: string[] }
   | { t: 'auth'; user: string; password: string; totp?: string }
-  | { t: 'auth-ok'; targets: TargetInfo[] }
-  | { t: 'auth-fail'; message: string; retryAfterMs?: number }
+  | { t: 'auth-ok'; targets: TargetInfo[]; limits?: SessionLimits }
+  | { t: 'auth-fail'; message: string; retryAfterMs?: number; attemptsLeft?: number }
   | {
       t: 'open';
       target: string;
@@ -96,11 +96,20 @@ export type ControlMessage =
       dpi: number;
       timezone?: string;
       credentials?: { username?: string; password?: string; domain?: string };
+      /** Echoed in open-ok/open-fail/closed so replies can be matched to this request. */
+      ref?: number;
     }
-  | { t: 'open-ok' }
-  | { t: 'open-fail'; message: string }
-  | { t: 'closed'; message: string }
+  | { t: 'open-ok'; ref?: number }
+  | { t: 'open-fail'; message: string; ref?: number }
+  | { t: 'close-desktop' }
+  | { t: 'closed'; message: string; ref?: number }
   | { t: 'error'; message: string };
+
+/** Agent policy the client can warn about before it takes effect. 0 = no limit. */
+export interface SessionLimits {
+  idleTimeoutSeconds: number;
+  maxSessionSeconds: number;
+}
 
 export interface TargetInfo {
   id: string;

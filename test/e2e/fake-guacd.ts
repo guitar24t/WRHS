@@ -7,6 +7,8 @@ import { encodeInstruction, parseInstructions } from '@wrhs/agent';
 export interface FakeGuacd {
   port: number;
   connections: { params: Record<string, string>; received: string[][] }[];
+  /** End every remote desktop connection, as if the RDP server went away. */
+  dropConnections(): void;
   close(): Promise<void>;
 }
 
@@ -52,6 +54,9 @@ export async function startFakeGuacd(opts: { bannerAfterReady?: string[][] } = {
   return {
     port: typeof addr === 'object' && addr ? addr.port : 0,
     connections,
+    dropConnections: () => {
+      for (const s of sockets) s.destroy();
+    },
     close: () =>
       new Promise((r) => {
         for (const s of sockets) s.destroy();

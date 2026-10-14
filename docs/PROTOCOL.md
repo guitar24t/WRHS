@@ -203,11 +203,17 @@ ad = bytes 0..9 (type + nonce)
 |---|---|
 | agent → client | `{"t":"auth-required","methods":["password+totp"]}` |
 | client → agent | `{"t":"auth","user":"alice","password":"...","totp":"123456"}` |
-| agent → client | `{"t":"auth-ok","targets":[{"id":"desk","name":"Desk PC","protocol":"rdp","promptCredentials":true}]}` |
-| agent → client | `{"t":"auth-fail","message":"invalid credentials","retryAfterMs":120000}` |
-| client → agent | `{"t":"open","target":"desk","width":1920,"height":1080,"dpi":96,"timezone":"Europe/Berlin","credentials":{"username":"...","password":"...","domain":"..."}}` |
-| agent → client | `{"t":"open-ok"}` / `{"t":"open-fail","message":"..."}` |
-| agent → client | `{"t":"closed","message":"remote desktop disconnected"}` |
+| agent → client | `{"t":"auth-ok","targets":[{"id":"desk","name":"Desk PC","protocol":"rdp","promptCredentials":true}],"limits":{"idleTimeoutSeconds":3600,"maxSessionSeconds":43200}}` |
+| agent → client | `{"t":"auth-fail","message":"invalid credentials","attemptsLeft":2,"retryAfterMs":120000}` |
+| client → agent | `{"t":"open","ref":3,"target":"desk","width":1920,"height":1080,"dpi":96,"timezone":"Europe/Berlin","credentials":{"username":"...","password":"...","domain":"..."}}` |
+| agent → client | `{"t":"open-ok","ref":3}` / `{"t":"open-fail","message":"...","ref":3}` |
+| client → agent | `{"t":"close-desktop"}`: end the current desktop but stay signed in (no reply) |
+| agent → client | `{"t":"closed","message":"remote desktop disconnected","ref":3}`: the desktop ended on the remote side |
+
+`ref` is chosen by the client (increasing per session) and echoed back, so a
+`closed` notice for an earlier desktop can never close a newer one. An `open`
+while a desktop is active replaces it; the replaced desktop gets no `closed`
+notice. The agent always answers `open` with `open-ok` or `open-fail`.
 
 ### Channel 2: Guacamole
 

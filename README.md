@@ -48,6 +48,12 @@ and can only talk to your relay. There is nothing to install. See
   forwarding.
 - Per-user target lists, and per-target clipboard, file-transfer and audio
   policy, enforced in guacd.
+- Works on phones and tablets: tap to click, long-press to right-click, and an
+  on-screen keyboard button.
+- Clear feedback: a starting screen while the remote computer signs in, a
+  reconnecting overlay, warnings before idle or session-length sign-out, and
+  plain-language errors. The interface passes an automated WCAG 2.1 AA check
+  in light and dark mode.
 - Audit log of handshakes, logins, desktops opened, and tampering.
 
 ## Repository layout
