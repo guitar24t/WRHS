@@ -7,7 +7,7 @@ is `packages/protocol`. All integers are big-endian unless noted otherwise.
 
 ```
 +-------------------------------------------------------------+
-| Application: control channel (JSON) | Guacamole channel     |
+| Application: control (JSON) | Guacamole or RDP stream       |
 +-------------------------------------------------------------+
 | Record layer: reliability, padding, channels, cadence       |  end to end
 +-------------------------------------------------------------+
@@ -203,10 +203,10 @@ ad = bytes 0..9 (type + nonce)
 |---|---|
 | agent → client | `{"t":"auth-required","methods":["password+totp"]}` |
 | client → agent | `{"t":"auth","user":"alice","password":"...","totp":"123456"}` |
-| agent → client | `{"t":"auth-ok","targets":[{"id":"desk","name":"Desk PC","protocol":"rdp","promptCredentials":true}],"limits":{"idleTimeoutSeconds":3600,"maxSessionSeconds":43200}}` |
+| agent → client | `{"t":"auth-ok","targets":[{"id":"this-pc","name":"This PC (DESK)","protocol":"rdp","engine":"rdp","promptCredentials":true,"username":"alice"}],"limits":{"idleTimeoutSeconds":3600,"maxSessionSeconds":43200}}` |
 | agent → client | `{"t":"auth-fail","message":"invalid credentials","attemptsLeft":2,"retryAfterMs":120000}` |
-| client → agent | `{"t":"open","ref":3,"target":"desk","width":1920,"height":1080,"dpi":96,"timezone":"Europe/Berlin","credentials":{"username":"...","password":"...","domain":"..."}}` |
-| agent → client | `{"t":"open-ok","ref":3}` / `{"t":"open-fail","message":"...","ref":3}` |
+| client → agent | `{"t":"open","ref":3,"target":"desk","width":1920,"height":1080,"dpi":96,"timezone":"Europe/Berlin","credentials":{"username":"...","password":"...","domain":"..."}}` (`credentials` only for guacd targets) |
+| agent → client | `{"t":"open-ok","ref":3,"engine":"rdp"}` / `{"t":"open-fail","message":"...","ref":3}` |
 | client → agent | `{"t":"close-desktop"}`: end the current desktop but stay signed in (no reply) |
 | agent → client | `{"t":"closed","message":"remote desktop disconnected","ref":3}`: the desktop ended on the remote side |
 
@@ -215,8 +215,45 @@ ad = bytes 0..9 (type + nonce)
 while a desktop is active replaces it; the replaced desktop gets no `closed`
 notice. The agent always answers `open` with `open-ok` or `open-fail`.
 
+Targets name their `engine`: `rdp` (built-in: the browser runs the RDP
+client, channel 3) or `guacd` (channel 2). Older agents omit it, meaning
+`guacd`. For `rdp` targets, `promptCredentials` means Network Level
+Authentication is on, so the client asks for the remote computer's
+credentials and uses them itself; `username` and `domain` are suggestions
+for that prompt. For `guacd` targets, the client sends typed credentials in
+`open`, and `promptCredentials` is false when the agent has stored ones.
+
 ### Channel 2: Guacamole
 
 This channel carries the raw Guacamole protocol byte stream (UTF-8) after
 the guacd handshake, which the agent performs. Message boundaries carry no
 meaning. Client-to-agent messages contain whole instructions.
+
+### Channel 3: RDP (built-in engine)
+
+After `open-ok` with `engine: "rdp"`, the agent holds an open TCP connection
+to the target's RDP server and waits (30 s) for the client's RDP client
+(IronRDP) to start:
+
+1. Client → agent: one **RDCleanPath** request, a DER-encoded
+   `RDCleanPathPdu` (version 3390; see IronRDP's `ironrdp-rdcleanpath`)
+   carrying the client's X.224 Connection Request. The agent ignores the
+   request's `destination` and `proxy_auth`: the target was chosen with
+   `open`, and the session is already authenticated.
+2. The agent forwards the X.224 request to the server and reads its
+   Connection Confirm. If the server selected TLS or CredSSP, the agent
+   performs the TLS handshake (checking `certSha256` if the target pins
+   one).
+3. Agent → client: one RDCleanPath response: the server's X.224 Confirm, its
+   certificate chain and address, or an error (`GENERAL_ERROR` with a WSA
+   code, `NEGOTIATION_ERROR` with the server's Confirm).
+4. From then on the channel carries the plaintext RDP byte stream in both
+   directions; the agent encrypts it with the server's TLS. The client
+   performs CredSSP (NLA) itself, bound to the certificate from step 3.
+   Message boundaries carry no meaning; the client keeps each message under
+   32 KiB.
+
+When the server closes the connection the agent sends `closed`. After a
+failed step 3 it sends nothing further: the client's RDP client reports the
+reason, and the agent is ready for the next `open`. Client-to-server
+fast-path PDUs (input) count as activity for the idle timeout.

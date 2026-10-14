@@ -45,7 +45,7 @@ Leave Remote Desktop reachable from the local network as well.
 Where to write the launcher. Default: WRHS launcher.html on your desktop.
 
 .PARAMETER WinSWPath
-Use this copy of WinSW-x64.exe 2.12.0 (the service wrapper) instead of
+Use this copy of WinSW.NET461.exe 2.12.0 (the service wrapper) instead of
 downloading it. Its SHA-256 is checked either way.
 
 .PARAMETER NodePath
@@ -76,8 +76,10 @@ $DataDir = Join-Path $env:ProgramData 'WRHS'
 $LogDir = Join-Path $DataDir 'logs'
 $ConfigPath = Join-Path $DataDir 'agent.json'
 $StatePath = Join-Path $DataDir 'install-state.json'
-$WinSWUrl = 'https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW-x64.exe'
-$WinSWSha256 = '05B82D46AD331CC16BDC00DE5C6332C1EF818DF8CEEFCD49C726553209B3A0DA'
+# The .NET Framework build: runs on the framework built into Windows, as a
+# plain executable (the self-contained builds unpack themselves at start).
+$WinSWUrl = 'https://github.com/winsw/winsw/releases/download/v2.12.0/WinSW.NET461.exe'
+$WinSWSha256 = 'B5066B7BBDFBA1293E5D15CDA3CAAEA88FBEAB35BD5B38C41C913D492AADFC4F'
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Well-known SIDs, so this works in every display language.
@@ -228,7 +230,7 @@ Step 'Installing the WRHS Agent service'
 $serviceExe = Join-Path $AppDir 'wrhs-agent-service.exe'
 $haveWrapper = (Test-Path $serviceExe) -and ((Get-FileHash -Algorithm SHA256 $serviceExe).Hash -eq $WinSWSha256)
 if (-not $haveWrapper) {
-  $download = Join-Path $env:TEMP "WinSW-x64-$([guid]::NewGuid()).exe"
+  $download = Join-Path $env:TEMP "WinSW-$([guid]::NewGuid()).exe"
   if ($WinSWPath) {
     Copy-Item -Force $WinSWPath $download
   } else {
@@ -281,8 +283,18 @@ if (-not (Get-Service -Name $ServiceId -ErrorAction SilentlyContinue)) {
 $change = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceId'" |
   Invoke-CimMethod -MethodName Change -Arguments @{ StartName = 'NT AUTHORITY\LocalService'; StartPassword = '' }
 if ($change.ReturnValue -ne 0) { throw "Could not set the service account (error $($change.ReturnValue))." }
-Start-Service -Name $ServiceId
-(Get-Service -Name $ServiceId).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+try {
+  Start-Service -Name $ServiceId
+  (Get-Service -Name $ServiceId).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
+} catch {
+  Write-Host 'The service did not start. Details:' -ForegroundColor Yellow
+  Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceId'" |
+    Format-List Name, State, ExitCode, ServiceSpecificExitCode, StartName, PathName | Out-String | Write-Host
+  Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; StartTime = (Get-Date).AddMinutes(-5) } -MaxEvents 10 -ErrorAction SilentlyContinue |
+    Format-List TimeCreated, Id, Message | Out-String | Write-Host
+  Get-ChildItem -Path $LogDir -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "--- $($_.Name)"; Get-Content -Tail 30 $_.FullName }
+  throw
+}
 
 # ---------------------------------------------------------------- launcher and summary
 

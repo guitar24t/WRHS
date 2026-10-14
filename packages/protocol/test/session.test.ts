@@ -173,7 +173,9 @@ test('cadence mode sends fixed-interval, fixed-size records and the peer follows
   await sleep(250);
   assert.equal(atB.length, 1);
   const a2b = log.filter((l) => l.dir === 'a2b' && readU64(l.frame, 1) < 1n << 63n);
-  assert.ok(a2b.length >= 8, `expected chaff stream, saw ${a2b.length} records`);
+  // 200 ms of hold at a 20 ms grid is ~10 ticks. Windows' 15.6 ms timer
+  // granularity stretches the grid to ~31 ms (still fixed), so ~6 ticks there.
+  assert.ok(a2b.length >= 5, `expected chaff stream, saw ${a2b.length} records`);
   const sizes = new Set(a2b.map((l) => l.frame.length));
   assert.equal(sizes.size, 1, 'keystroke record is indistinguishable from chaff by size');
   assert.ok(b.cadenceActive || log.some((l) => l.dir === 'b2a' && l.frame.length >= 1024 + 25), 'peer entered cadence');
