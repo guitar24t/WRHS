@@ -245,7 +245,10 @@ if (-not $haveWrapper) {
     throw "The service wrapper does not have the expected SHA-256 ($hash). Not installing it."
   }
   if ($existing) { & $serviceExe uninstall | Out-Null; $existing = $null }
-  Move-Item -Force $download $serviceExe
+  # Copy, not move: a moved file keeps the temp folder's permissions, which
+  # do not let the service account run it.
+  Copy-Item -Force $download $serviceExe
+  Remove-Item -Force $download
 }
 
 $x = { param([string]$s) [Security.SecurityElement]::Escape($s) }

@@ -22,6 +22,12 @@ export class RelayLink {
   #stopped = false;
   #backoff = 0;
   #onlineWaiters: (() => void)[] = [];
+  /**
+   * Keeps the process alive between reconnection attempts, whose timers are
+   * unref'd: without it the agent would exit when the relay is unreachable
+   * (for example at boot, before the network is up).
+   */
+  #keepAlive: ReturnType<typeof setInterval> | null = null;
 
   constructor(ctx: AgentContext) {
     this.#ctx = ctx;
@@ -29,6 +35,7 @@ export class RelayLink {
   }
 
   start(): void {
+    this.#keepAlive ??= setInterval(() => {}, 1 << 30);
     this.#connectControl();
   }
 
@@ -40,6 +47,8 @@ export class RelayLink {
 
   stop(): void {
     this.#stopped = true;
+    if (this.#keepAlive) clearInterval(this.#keepAlive);
+    this.#keepAlive = null;
     this.#control?.close(1000);
     for (const { handler } of this.#handlers.values()) handler.end('agent shutting down');
   }
