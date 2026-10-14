@@ -1,18 +1,26 @@
 // Windows integration check, run by CI after deploy/windows/install.ps1:
-// Chromium opens the offline launcher, signs in through the relay to the
-// installed agent service, opens "This PC" and signs in to this computer's
-// own Remote Desktop with a Windows account. Passes when Windows has an
-// active Remote Desktop session for that account and the desktop is drawn.
+// it runs a relay for the installed agent service, then Chromium opens the
+// offline launcher, signs in through the relay, opens "This PC" and signs
+// in to this computer's own Remote Desktop with a Windows account. Passes
+// when Windows has an active Remote Desktop session for that account and
+// the desktop is drawn.
+//
+// The relay runs in this process because the CI runner ends processes left
+// behind by earlier steps.
 //
 // Environment: WRHS_LAUNCHER, WRHS_CONFIG, WRHS_USER, WRHS_PASSWORD,
 // RDP_USER, RDP_PASS, optional SCREENSHOT_DIR and PLAYWRIGHT_MODULE.
 
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { totpCode } from '../../packages/agent/src/auth.ts';
+import { loadKey } from '../../packages/agent/src/keys.ts';
+import { agentIdFromPublicKey } from '../../packages/protocol/src/index.ts';
+import { createRelay } from '../../packages/relay/src/relay.ts';
 
 const env = (name: string): string => {
   const v = process.env[name];
@@ -20,12 +28,37 @@ const env = (name: string): string => {
   return v;
 };
 
-const config = JSON.parse(readFileSync(env('WRHS_CONFIG'), 'utf8')) as { users: { name: string; totpSecret?: string }[] };
+const configPath = env('WRHS_CONFIG');
+const config = JSON.parse(readFileSync(configPath, 'utf8')) as {
+  relayUrl: string;
+  relayToken: string;
+  keyFile?: string;
+  users: { name: string; totpSecret?: string }[];
+};
 const wrhsUser = env('WRHS_USER');
 const secret = config.users.find((u) => u.name === wrhsUser)?.totpSecret;
 assert.ok(secret, `user ${wrhsUser} with TOTP in the agent config`);
 const rdpUser = env('RDP_USER');
 const shots = process.env.SCREENSHOT_DIR ?? '.';
+
+// The relay the agent was installed with (http://127.0.0.1:<port>).
+const agentId = agentIdFromPublicKey(loadKey(resolve(dirname(configPath), config.keyFile ?? 'agent.key.json')).publicKey);
+let agentOnline = false;
+const relay = createRelay({
+  agentTokens: new Map([[agentId, createHash('sha256').update(config.relayToken).digest()]]),
+  log: (event, fields) => {
+    console.log(`[relay] ${event} ${JSON.stringify(fields ?? {})}`);
+    if (event === 'agent-online') agentOnline = true;
+  },
+});
+const relayUrl = new URL(config.relayUrl);
+await relay.listen(Number(relayUrl.port), relayUrl.hostname);
+// The service retries with backoff of up to 30 s.
+for (let i = 0; !agentOnline; i++) {
+  if (i > 90) throw new Error('the agent service did not connect to the relay');
+  await new Promise((r) => setTimeout(r, 1000));
+}
+console.log('The agent service is online.');
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const pw: any = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright');
@@ -141,5 +174,6 @@ try {
     console.log(sessions());
   }
   await browser.close();
+  await relay.close();
 }
 console.log('Windows Remote Desktop integration: OK');
