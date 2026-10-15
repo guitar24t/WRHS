@@ -309,8 +309,10 @@ For "This PC" the agent connects to `127.0.0.1:3389`. Windows treats that
 like any Remote Desktop connection: the user gets their session at the
 browser's size (Display Control resizes it live, with the browser's scale
 factor on high-density screens), and the local console locks. The
-installer turns Remote Desktop on with NLA and blocks it from the network,
-so the only way in is through the agent (see [WINDOWS.md](WINDOWS.md)).
+installer turns Remote Desktop on with NLA. By default it stays reachable on
+the local network for regular clients; with `-DisallowNetworkRdp` it is
+blocked from the network, so the only way in is through the agent (see
+[WINDOWS.md](WINDOWS.md)).
 
 Flow control: the agent pauses reading from the RDP server while too much
 data is unacknowledged at the record layer.

@@ -55,7 +55,7 @@ if (Test-Path $StatePath) {
   if ($null -ne $state.UserAuthentication) {
     Set-ItemProperty -Path "$tsKey\WinStations\RDP-Tcp" -Name UserAuthentication -Value ([int]$state.UserAuthentication) -Type DWord
   }
-  # Exactly the rules that were on before: -AllowNetworkRdp may have turned on others.
+  # Exactly the rules that were on before: the installer may have turned on others.
   $wasEnabled = @($state.enabledFirewallRules)
   foreach ($rule in @(Get-NetFirewallRule -Group $RdpFirewallGroup -ErrorAction SilentlyContinue)) {
     if ($wasEnabled -contains $rule.Name) { $rule | Enable-NetFirewallRule } else { $rule | Disable-NetFirewallRule }

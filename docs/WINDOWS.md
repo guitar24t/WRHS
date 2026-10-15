@@ -22,8 +22,9 @@ The agent opens a connection to this PC's own Remote Desktop service on
 127.0.0.1 and passes it, through the end-to-end encrypted session, to the
 RDP client in your browser (IronRDP, built into the launcher). You sign in
 with your Windows account; Network Level Authentication runs in your
-browser. Remote Desktop itself is blocked from the network, so WRHS is the
-only way in.
+browser. Remote Desktop stays reachable from your local network for regular
+Remote Desktop clients. To make WRHS the only way in, install with
+`-DisallowNetworkRdp`.
 
 ## Requirements
 
@@ -80,8 +81,8 @@ only way in.
 | `-Name <name>` | Agent name shown to users (default: computer name). |
 | `-User <name>` | Create a WRHS user (password from the prompt or `$env:WRHS_PASSWORD`). |
 | `-RemoteDesktopUser <account>` | Add a Windows account to "Remote Desktop Users". Administrators can already connect. |
-| `-AllowNetworkRdp` | Keep Remote Desktop reachable from the local network too, for regular Remote Desktop clients. Remembered for upgrades. |
-| `-BlockNetworkRdp` | Block Remote Desktop from the network again, or block it even though someone is connected over the network now. |
+| `-DisallowNetworkRdp` | Block Remote Desktop from the network, so WRHS is the only way in. Remembered for upgrades. |
+| `-AllowNetworkRdp` | Open Remote Desktop to the local network again after `-DisallowNetworkRdp` (the default otherwise). |
 | `-LauncherOut <file>` | Where to write the launcher. |
 | `-WinSWPath <file>` | Use a local copy of the service wrapper. |
 | `-NodePath <node.exe>` | Node.js to run the agent with (default: the one on PATH). |
@@ -89,29 +90,28 @@ only way in.
 Running `install.ps1` again upgrades the agent. The configuration, users and
 identity key are kept, so existing launchers keep working.
 
-### Regular Remote Desktop on the local network too
+### Remote Desktop from the local network
 
-By default the installer blocks Remote Desktop from the network, so WRHS is
-the only way in. If people on your network also connect with a regular
-Remote Desktop client, keep it open:
+By default Remote Desktop stays reachable from your local network, so people
+there can keep using a regular Remote Desktop client. WRHS works either way:
+the agent connects over loopback. To make WRHS the only way in, block it:
 
 ```powershell
-.\install.ps1 -RelayUrl https://relay.example.com -User alice -AllowNetworkRdp
-.\install.ps1 -AllowNetworkRdp      # on an installed PC: opens it again
-.\install.ps1 -BlockNetworkRdp      # back to WRHS only
+.\install.ps1 -DisallowNetworkRdp   # WRHS only (disconnects anyone connected over the network)
+.\install.ps1 -AllowNetworkRdp      # open to the local network again
 ```
 
-The choice is kept when you upgrade. If someone is connected over the network
-when the installer would block Remote Desktop, it stops without changing
-anything, because blocking would disconnect them. Rerun it with one of the
-two options.
+The choice is kept when you upgrade. Suppose you blocked it, then opened it
+by hand, and someone is connected over the network when you upgrade. Then
+the installer stops without changing anything rather than disconnect them,
+and asks you to choose one of the two options.
 
 ## What the installer changes
 
 | Where | Change |
 |---|---|
 | Remote Desktop | Turned on (`fDenyTSConnections = 0`), with Network Level Authentication required (`UserAuthentication = 1`). |
-| Windows Firewall | Windows' built-in "Remote Desktop" rules are disabled, and rules `WRHS-Block-RDP-TCP/UDP` block the RDP port from the network. Windows Firewall does not filter loopback, so the agent still connects. With `-AllowNetworkRdp`: no WRHS rules, and Windows' "Remote Desktop" rules are turned on, as Settings does. |
+| Windows Firewall | Windows' built-in "Remote Desktop" rules are turned on, as Settings does. With `-DisallowNetworkRdp` they are turned off instead, and rules `WRHS-Block-RDP-TCP/UDP` block the RDP port from the network. Windows Firewall does not filter loopback, so the agent still connects. |
 | `%ProgramFiles%\WRHS` | The agent (`wrhs-agent.mjs`), the launcher template, and the service wrapper and its XML. |
 | `%ProgramData%\WRHS` | `agent.json` (users, targets, policy), `agent.key.json` (identity key) and `logs\`. Only Administrators and SYSTEM have access; the service can read, and write its logs. |
 | Services | **WRHS Agent** (`WRHSAgent`): automatic start, restart on failure, runs as `NT AUTHORITY\LocalService`. |
