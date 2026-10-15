@@ -232,7 +232,8 @@ $CLI enroll-device alice <device-key-base64url>
 - [ ] `agent.key.json` and `agent.json` are mode 0600 and backed up.
 - [ ] guacd (if used) is not reachable from anywhere except the agent.
 - [ ] Remote Desktop on the agent's own PC is blocked from the network
-      (the Windows installer does this), and LAN targets pin `certSha256`.
+      unless people need it there (Windows installer: `-DisallowNetworkRdp`),
+      and LAN targets pin `certSha256`.
 - [ ] RDP hosts use NLA. Users have strong passwords and TOTP.
 - [ ] Clipboard and file transfer are only enabled where needed.
 - [ ] Launchers are distributed over trusted channels. The hosted client is

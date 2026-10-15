@@ -71,29 +71,6 @@ jobs:
           Write-Host "::add-mask::$pw"
           New-LocalUser -Name wrhsrdp -Password (ConvertTo-SecureString $pw -AsPlainText -Force) -PasswordNeverExpires | Out-Null
           "RDP_PASS=$pw" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
-      - name: The installer does not cut off someone using Remote Desktop over the network
-        shell: powershell
-        run: |
-          Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
-          Start-Service TermService
-          # A connection to this runner's own network address counts as one from the network.
-          $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
-          $tcp = $null
-          for ($i = 0; -not $tcp -and $i -lt 30; $i++) {
-            try { $tcp = New-Object Net.Sockets.TcpClient($ip, 3389) } catch { Start-Sleep -Seconds 1 }
-          }
-          if (-not $tcp) { throw "Remote Desktop is not reachable on ${ip}:3389" }
-          try {
-            .\dist\windows\install.ps1 -RelayUrl http://127.0.0.1:8080 -LauncherOut "$env:RUNNER_TEMP\unused.html"
-            throw 'The installer did not refuse.'
-          } catch {
-            if ($_.Exception.Message -notmatch 'in use from the network') { throw }
-            Write-Host "Refused as expected: $($_.Exception.Message)"
-          } finally {
-            $tcp.Dispose()
-          }
-          if (Get-NetFirewallRule -Name 'WRHS-*' -ErrorAction SilentlyContinue) { throw 'It changed the firewall anyway.' }
-          if (Test-Path 'C:\ProgramData\WRHS') { throw 'It started installing anyway.' }
       - name: Install the agent service
         shell: powershell
         env:
@@ -129,7 +106,7 @@ jobs:
           RDP_USER: wrhsrdp
           SCREENSHOT_DIR: ${{ runner.temp }}
         run: node test/windows/rdp-integration.ts
-      - name: Re-running the installer switches Remote Desktop from the network on and off, and remembers it
+      - name: Re-running the installer switches Remote Desktop from the network off and on, and remembers it
         shell: powershell
         run: |
           function Assert-NetworkRdp([string]$Expected, [string]$When) {
@@ -141,13 +118,35 @@ jobs:
             Write-Host "${When}: $actual"
           }
           $out = "$env:RUNNER_TEMP\launcher-again.html"
-          Assert-NetworkRdp block 'after the first installation'
+          Assert-NetworkRdp allow 'after the first installation'
+          .\dist\windows\install.ps1 -DisallowNetworkRdp -LauncherOut $out
+          Assert-NetworkRdp block 'with -DisallowNetworkRdp'
+          .\dist\windows\install.ps1 -LauncherOut $out
+          Assert-NetworkRdp block 'after an upgrade'
+
+          # Opened by hand since, and in use from the network: an upgrade must
+          # not cut that off. A connection to this runner's own network
+          # address counts as one from the network.
+          Remove-NetFirewallRule -Name 'WRHS-Block-RDP-TCP', 'WRHS-Block-RDP-UDP'
+          Get-NetFirewallRule -Group '@FirewallAPI.dll,-28752' | Enable-NetFirewallRule
+          $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | Select-Object -First 1).IPAddress
+          $tcp = $null
+          for ($i = 0; -not $tcp -and $i -lt 30; $i++) {
+            try { $tcp = New-Object Net.Sockets.TcpClient($ip, 3389) } catch { Start-Sleep -Seconds 1 }
+          }
+          if (-not $tcp) { throw "Remote Desktop is not reachable on ${ip}:3389" }
+          try {
+            .\dist\windows\install.ps1 -LauncherOut $out
+            throw 'The installer did not refuse.'
+          } catch {
+            if ($_.Exception.Message -notmatch 'in use from the network') { throw }
+            Write-Host "Refused as expected: $($_.Exception.Message)"
+          } finally {
+            $tcp.Dispose()
+          }
+          Assert-NetworkRdp allow 'after refusing (nothing changed)'
           .\dist\windows\install.ps1 -AllowNetworkRdp -LauncherOut $out
           Assert-NetworkRdp allow 'with -AllowNetworkRdp'
-          .\dist\windows\install.ps1 -LauncherOut $out
-          Assert-NetworkRdp allow 'after an upgrade'
-          .\dist\windows\install.ps1 -BlockNetworkRdp -LauncherOut $out
-          Assert-NetworkRdp block 'with -BlockNetworkRdp'
       - name: Collect logs
         if: always()
         shell: powershell

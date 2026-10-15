@@ -8,11 +8,10 @@ What it does:
   * Checks that this edition of Windows can host Remote Desktop sessions
     (Pro, Enterprise, Education or Server; Home cannot).
   * Turns on Remote Desktop with Network Level Authentication.
-  * Blocks Remote Desktop from the network, so the only way in is through
-    WRHS: the agent connects to it over loopback. With -AllowNetworkRdp it
-    stays reachable on the local network too. An upgrade keeps the choice.
-    It does not block while someone is connected over the network (that
-    would disconnect them) unless you pass -BlockNetworkRdp.
+  * Keeps Remote Desktop reachable from the local network, for regular
+    Remote Desktop clients. With -DisallowNetworkRdp it is blocked from the
+    network, so the only way in is through WRHS (the agent connects to it
+    over loopback either way). An upgrade keeps the choice.
   * Copies the agent to %ProgramFiles%\WRHS. Its configuration and identity
     key live in %ProgramData%\WRHS, readable only by Administrators, SYSTEM
     and the service.
@@ -42,13 +41,13 @@ Windows account to add to "Remote Desktop Users". Administrators can already
 connect; other accounts need this.
 
 .PARAMETER AllowNetworkRdp
-Keep Remote Desktop reachable from the local network as well, for regular
-Remote Desktop clients. Turns on Windows' own Remote Desktop firewall rules
-(as Settings does) and removes WRHS's block. Remembered for upgrades.
+Keep Remote Desktop reachable from the local network (the default): turns on
+Windows' own Remote Desktop firewall rules, as Settings does. Use it to undo
+-DisallowNetworkRdp; an upgrade otherwise keeps the last choice.
 
-.PARAMETER BlockNetworkRdp
-Block Remote Desktop from the network (the default for a new installation),
-even if it was allowed before or someone is connected over the network now.
+.PARAMETER DisallowNetworkRdp
+Block Remote Desktop from the network, so WRHS is the only way in. This
+disconnects anyone connected over the network. Remembered for upgrades.
 
 .PARAMETER LauncherOut
 Where to write the launcher. Default: WRHS launcher.html on your desktop.
@@ -71,7 +70,7 @@ param(
   [string]$User,
   [string]$RemoteDesktopUser,
   [switch]$AllowNetworkRdp,
-  [switch]$BlockNetworkRdp,
+  [switch]$DisallowNetworkRdp,
   [string]$LauncherOut,
   [string]$WinSWPath,
   [string]$NodePath
@@ -154,26 +153,30 @@ foreach ($f in @($bundle, $template)) {
 if (-not (Test-Path $ConfigPath) -and -not $RelayUrl) { throw '-RelayUrl is required for the first installation.' }
 
 # Remote Desktop from the network: as asked, else as the last installation
-# left it, else blocked.
-if ($AllowNetworkRdp -and $BlockNetworkRdp) { throw 'Use -AllowNetworkRdp or -BlockNetworkRdp, not both.' }
+# left it, else allowed.
+if ($AllowNetworkRdp -and $DisallowNetworkRdp) { throw 'Use -AllowNetworkRdp or -DisallowNetworkRdp, not both.' }
 $tsKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
 $rdpTcpKey = "$tsKey\WinStations\RDP-Tcp"
 $rdpPort = [int](Get-ItemProperty $rdpTcpKey).PortNumber
 $blockInPlace = [bool](Get-NetFirewallRule -Name 'WRHS-Block-RDP-TCP' -ErrorAction SilentlyContinue)
-$networkRdp = 'block'
-if ($AllowNetworkRdp) {
-  $networkRdp = 'allow'
-} elseif (-not $BlockNetworkRdp -and (Test-Path $StatePath)) {
+$networkRdp = 'allow'
+if ($DisallowNetworkRdp) {
+  $networkRdp = 'block'
+} elseif (-not $AllowNetworkRdp -and (Test-Path $StatePath)) {
   $previous = Get-Content -Raw -Path $StatePath | ConvertFrom-Json
   if ($previous.PSObject.Properties['networkRdp']) { $networkRdp = $previous.networkRdp }
-  elseif (-not $blockInPlace) { $networkRdp = 'allow' } # installed with -AllowNetworkRdp by an older version
+  elseif ($blockInPlace) { $networkRdp = 'block' } # installed by an older version, which blocked by default
 }
-if ($networkRdp -eq 'block' -and -not $blockInPlace -and -not $BlockNetworkRdp) {
+if ($networkRdp -eq 'block' -and -not $blockInPlace) {
   $clients = @(Get-NetworkRdpClient $rdpPort)
-  if ($clients.Count -gt 0) {
-    throw ("Remote Desktop is in use from the network ($($clients -join ', ')), perhaps by you. Blocking it would disconnect " +
-      'those sessions. Run this again with -AllowNetworkRdp to keep Remote Desktop reachable on the local network as well, ' +
-      'or with -BlockNetworkRdp to block it anyway.')
+  if ($clients.Count -gt 0 -and $DisallowNetworkRdp) {
+    Write-Warning "Remote Desktop is in use from the network ($($clients -join ', ')). Blocking it disconnects those sessions."
+  } elseif ($clients.Count -gt 0) {
+    # Blocked by the last installation and opened by hand since: do not cut
+    # off the people now using it just because of an upgrade.
+    throw ("Remote Desktop is in use from the network ($($clients -join ', ')), perhaps by you. The last installation " +
+      'blocked it, and blocking it again would disconnect those sessions. Run this again with -AllowNetworkRdp to keep ' +
+      'Remote Desktop reachable on the local network, or with -DisallowNetworkRdp to block it anyway.')
   }
 }
 
@@ -218,9 +221,10 @@ if ($networkRdp -eq 'allow') {
   Remove-NetFirewallRule -Name 'WRHS-Block-RDP-TCP', 'WRHS-Block-RDP-UDP' -ErrorAction SilentlyContinue
   # The rules Windows turns on when Remote Desktop is enabled in Settings.
   Get-NetFirewallRule -Group $RdpFirewallGroup -ErrorAction SilentlyContinue | Enable-NetFirewallRule
-  if (-not $AllowNetworkRdp) { Write-Host '    (as the last installation left it; -BlockNetworkRdp blocks it)' }
+  Write-Host '    (-DisallowNetworkRdp blocks it, so that WRHS is the only way in)'
 } else {
   Step "Blocking Remote Desktop (port $rdpPort) from the network; WRHS reaches it over loopback"
+  if (-not $DisallowNetworkRdp) { Write-Host '    (as the last installation left it; -AllowNetworkRdp opens it)' }
   Get-NetFirewallRule -Group $RdpFirewallGroup -ErrorAction SilentlyContinue | Disable-NetFirewallRule
   Remove-NetFirewallRule -Name 'WRHS-Block-RDP-TCP', 'WRHS-Block-RDP-UDP' -ErrorAction SilentlyContinue
   # Windows Firewall does not filter loopback traffic, so these leave the agent's connection alone.
