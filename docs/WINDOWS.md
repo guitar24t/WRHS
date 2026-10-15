@@ -60,7 +60,9 @@ only way in.
      (an `otpauth://` link and the secret) for her phone.
    - At the end it prints the agent's identity and its **relay
      registration** entry. Add it to the relay's `agents.json` and restart
-     the relay (`docker compose restart relay`). To print the entry again:
+     the relay (`docker compose restart relay`, or with the native relay
+     install: `sudo deploy/relay/install.sh add-agent '<entry>'`). To print
+     the entry again:
      `node "$env:ProgramFiles\WRHS\wrhs-agent.mjs" registration --config "$env:ProgramData\WRHS\agent.json"`.
    - It writes **WRHS launcher.html** to your desktop.
 

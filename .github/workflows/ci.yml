@@ -125,3 +125,63 @@ jobs:
           .\dist\windows\uninstall.ps1 -RemoveData
           if (Get-Service -Name WRHSAgent -ErrorAction SilentlyContinue) { throw 'The service is still installed.' }
           if (Get-NetFirewallRule -Name 'WRHS-*' -ErrorAction SilentlyContinue) { throw 'Firewall rules are left behind.' }
+
+  # deploy/relay/install.sh on a real Ubuntu VM: relay as a systemd service
+  # behind Caddy, an agent connecting through it, upgrade, Cloudflare mode's
+  # package install, and uninstall.
+  relay-native:
+    name: relay (native install on Ubuntu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the relay behind Caddy
+        run: |
+          # As on a server with the distribution's older Node.js: the installer
+          # must bring in Node.js 22 from NodeSource.
+          sudo mv /usr/local/bin/node /usr/local/bin/node.runner
+          sudo apt-get update -qq && sudo apt-get install -y -qq nodejs
+          /usr/bin/node --version
+          sudo deploy/relay/install.sh --domain localhost
+          grep -qx 'ExecStart=/usr/bin/node /opt/wrhs-relay/packages/relay/src/main.ts' /etc/systemd/system/wrhs-relay.service
+          /usr/bin/node --version | grep '^v22\.'
+      - name: The relay answers through Caddy, as its own user
+        run: |
+          systemctl is-active wrhs-relay caddy
+          test "$(systemctl show wrhs-relay -p User --value)" = wrhs-relay
+          sudo cat /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt > "$RUNNER_TEMP/caddy-root.crt"
+          curl -fsS --cacert "$RUNNER_TEMP/caddy-root.crt" https://localhost/healthz
+          # Only the reverse proxy is reachable from outside.
+          ss -ltnp | grep -E '127\.0\.0\.1:8080'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: An agent registers and connects through Caddy
+        run: |
+          D="$RUNNER_TEMP/agent"; mkdir -p "$D"
+          node dist/agent/wrhs-agent.mjs init --relay https://localhost --this-pc --config "$D/agent.json"
+          sudo deploy/relay/install.sh add-agent "$(node dist/agent/wrhs-agent.mjs registration --config "$D/agent.json")"
+          NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/caddy-root.crt" node dist/agent/wrhs-agent.mjs run --config "$D/agent.json" > "$D/agent.log" 2>&1 &
+          for i in $(seq 1 30); do grep -q relay-connected "$D/agent.log" && break; sleep 1; done
+          cat "$D/agent.log"
+          grep -q relay-connected "$D/agent.log"
+          sudo journalctl -u wrhs-relay --no-pager | grep agent-online
+      - name: Running it again upgrades and keeps agents and settings
+        run: |
+          sudo deploy/relay/install.sh
+          test "$(sudo deploy/relay/install.sh list-agents | wc -l)" = 1
+          sudo deploy/relay/install.sh status
+          curl -fsS --cacert "$RUNNER_TEMP/caddy-root.crt" https://localhost/healthz
+      - name: Cloudflare mode installs cloudflared
+        run: |
+          sudo deploy/relay/install.sh --tls cloudflare --domain relay.example.invalid
+          cloudflared --version
+      - name: Uninstall removes everything
+        run: |
+          sudo deploy/relay/install.sh uninstall --purge
+          test ! -e /etc/systemd/system/wrhs-relay.service
+          test ! -e /opt/wrhs-relay && test ! -e /etc/wrhs-relay && test ! -e /etc/caddy/wrhs-relay.caddy
+          ! id wrhs-relay
