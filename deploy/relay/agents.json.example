@@ -1,3 +1,3 @@
 {
-  "0123456789abcdef0123456789abcdef": "sha256-hex-of-the-agent-relayToken-printed-by-wrhs-agent-show"
+  "_comment": "Agents allowed to use this relay, one entry per agent: \"<agent id>\": \"<SHA-256 of its relay token>\". Print an agent's entry with `wrhs-agent registration`, add it here, then restart the relay."
 }

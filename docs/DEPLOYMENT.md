@@ -34,7 +34,7 @@ Requirements: a host with ports 80/443 open and a DNS name, for example
 
 ```bash
 cd deploy/relay
-cp agents.json.example agents.json   # filled in at step 2
+cp agents.json.example agents.json   # no agents yet; you add them at step 2
 RELAY_DOMAIN=relay.example.com docker compose up -d
 ```
 
@@ -75,14 +75,16 @@ $CLI init --relay https://relay.example.com --name "Home office"
 ```
 
 `init` creates `data/agent.key.json` (the agent identity; keep it secret and
-back it up) and `data/agent.json`. It also prints the line to add to the
-relay's `agents.json`:
+back it up) and `data/agent.json`. It also prints the agent's entry for the
+relay's `agents.json` (`$CLI registration` prints it again, as JSON):
 
 ```json
 { "5c7f612b9b0803b5c3a6765e1bfe0cf2": "896e805b...f8f" }
 ```
 
-Copy that line to the relay host and restart the relay. If you will use
+Add the entry to `agents.json` on the relay host (one entry per agent, in
+the same `{ }`) and restart the relay: `docker compose restart relay`. It
+reads the file only at startup. If you will use
 guacd targets, edit `data/agent.json` and set
 `"guacd": {"host": "guacd", "port": 4822}`.
 
