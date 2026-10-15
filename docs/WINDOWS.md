@@ -58,8 +58,10 @@ only way in.
 
    - It asks for alice's WRHS password and prints the authenticator setup
      (an `otpauth://` link and the secret) for her phone.
-   - At the end it prints the agent's identity and the **relay registration
-     line**. Add that line to the relay's agents file.
+   - At the end it prints the agent's identity and its **relay
+     registration** entry. Add it to the relay's `agents.json` and restart
+     the relay (`docker compose restart relay`). To print the entry again:
+     `node "$env:ProgramFiles\WRHS\wrhs-agent.mjs" registration --config "$env:ProgramData\WRHS\agent.json"`.
    - It writes **WRHS launcher.html** to your desktop.
 
 3. Copy the launcher to the devices you will connect from, over a channel

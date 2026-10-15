@@ -3,8 +3,10 @@
 # confidentiality, only for availability.
 #
 #   1. Point DNS for $RELAY_DOMAIN at this host.
-#   2. Put agent registrations in ./agents.json (printed by `wrhs-agent init`).
+#   2. cp agents.json.example agents.json
 #   3. RELAY_DOMAIN=relay.example.com docker compose up -d
+#   4. Add each agent's entry (`wrhs-agent registration`) to ./agents.json,
+#      then: docker compose restart relay
 services:
   relay:
     build: ../..

@@ -5,6 +5,7 @@
 //   RELAY_HOST=0.0.0.0            listen address
 //   RELAY_TLS_CERT / RELAY_TLS_KEY  terminate TLS here (otherwise put Caddy/nginx in front)
 //   RELAY_AGENTS_FILE=agents.json {"<agentId>": "<sha256 hex of agent token>", ...}
+//                                 (read at startup; restart after changing it)
 //   RELAY_OPEN_REGISTRATION=1     accept any agent (development only!)
 //   RELAY_HOSTED_CLIENT=path      serve the hosted web client at / (convenience mode)
 //   RELAY_TRUST_PROXY=1           use X-Forwarded-For for rate limiting
@@ -13,6 +14,7 @@
 //   RELAY_MAX_SESSIONS_PER_AGENT=32
 
 import { readFileSync } from 'node:fs';
+import { parseAgentsFile } from './agents-file.ts';
 import { createRelay } from './relay.ts';
 
 function loadAgentTokens(): Map<string, Buffer> | null {
@@ -22,13 +24,7 @@ function loadAgentTokens(): Map<string, Buffer> | null {
   }
   const file = process.env.RELAY_AGENTS_FILE;
   if (!file) throw new Error('set RELAY_AGENTS_FILE (or RELAY_OPEN_REGISTRATION=1 for development)');
-  const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, string>;
-  const map = new Map<string, Buffer>();
-  for (const [id, hash] of Object.entries(raw)) {
-    if (!/^[0-9a-f]{32}$/.test(id) || !/^[0-9a-f]{64}$/.test(hash)) throw new Error(`bad entry for ${id} in ${file}`);
-    map.set(id, Buffer.from(hash, 'hex'));
-  }
-  return map;
+  return parseAgentsFile(readFileSync(file, 'utf8'), file);
 }
 
 function intEnv<K extends string>(name: string, key: K): Partial<Record<K, number>> {
