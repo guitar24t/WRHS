@@ -322,12 +322,11 @@ $agentJs = Join-Path $AppDir 'wrhs-agent.mjs'
 </service>
 "@ | Set-Content -Encoding UTF8 -Path (Join-Path $AppDir 'wrhs-agent-service.xml')
 
+# An installed service needs nothing more: WinSW 2 reads the XML above each
+# time the service starts (it has no "refresh" command).
 if (-not (Get-Service -Name $ServiceId -ErrorAction SilentlyContinue)) {
   & $serviceExe install
   if ($LASTEXITCODE -ne 0) { throw 'Installing the service failed.' }
-} else {
-  & $serviceExe refresh
-  if ($LASTEXITCODE -ne 0) { throw 'Updating the service failed.' }
 }
 # Least privilege: the agent only reads its configuration and talks to the network.
 $change = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceId'" |
