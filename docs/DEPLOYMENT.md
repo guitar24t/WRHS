@@ -104,7 +104,13 @@ All are environment variables:
 | `RELAY_OPEN_REGISTRATION=1` | Accept any agent. **Development only.** |
 
 The relay logs JSON lines with metadata only: session open/close, agent
-online/offline, byte counts.
+online/offline, byte counts, and agents it turns away (`agent-rejected`, with
+the reason: not in the agents file, or wrong token).
+
+Behind Cloudflare (a tunnel or its proxy), its security features can turn
+the agent away before it reaches the relay: the agent's log then shows
+`relay-rejected` with `"server": "cloudflare"`. Check Browser Integrity Check,
+Bot Fight Mode, WAF rules and Cloudflare Access for the relay's hostname.
 
 ## 2. Agent
 

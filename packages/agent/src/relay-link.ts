@@ -14,6 +14,20 @@ function wsUrl(relayUrl: string, path: string): string {
   return u.toString();
 }
 
+/** What to check when the relay address answers the agent with an error. */
+export function rejectionHint(status: number, server?: string): string {
+  if (status === 401) {
+    return "The relay does not accept this agent. Add the agent's entry (wrhs-agent registration) to the relay's agents file and restart the relay.";
+  }
+  if (/cloudflare/i.test(server ?? '')) {
+    if (status >= 500) return 'Cloudflare cannot reach the relay. Check that the tunnel is running and sends this hostname to HTTP localhost:8080.';
+    return "Cloudflare turned the agent away before the relay: check this hostname's security settings (Browser Integrity Check, Bot Fight Mode, WAF rules, Access policies).";
+  }
+  if (status === 404) return 'This address does not lead to a WRHS relay. Check relayUrl in the agent configuration.';
+  if (status >= 500) return 'The relay or the proxy in front of it is failing. Check that the relay is running.';
+  return 'Something between the agent and the relay (a proxy or firewall) refused the connection.';
+}
+
 export class RelayLink {
   readonly agentId: string;
   readonly #ctx: AgentContext;
@@ -58,7 +72,11 @@ export class RelayLink {
   }
 
   #headers() {
-    return { Authorization: `Bearer ${this.#ctx.config.relayToken}` };
+    return {
+      Authorization: `Bearer ${this.#ctx.config.relayToken}`,
+      // Cloudflare and other CDNs turn away requests without a User-Agent.
+      'User-Agent': `${this.#ctx.software} node/${process.versions.node}`,
+    };
   }
 
   #connectControl(): void {
@@ -81,11 +99,19 @@ export class RelayLink {
       }
       if (msg.t === 'open' && typeof msg.sid === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(msg.sid)) this.#openSession(msg.sid);
     });
-    ws.on('unexpected-response', (req, res) => {
-      this.#ctx.log('relay-rejected', { status: res.statusCode });
-      req.destroy();
+    let rejected = false;
+    ws.on('unexpected-response', (_req, res) => {
+      rejected = true;
+      const status = res.statusCode ?? 0;
+      const server = typeof res.headers.server === 'string' ? res.headers.server : undefined;
+      this.#ctx.log('relay-rejected', { status, ...(server ? { server } : {}), hint: rejectionHint(status, server) });
+      // Ends this attempt with a 'close', which schedules the next one. (Only
+      // destroying the request leaves the socket waiting forever.)
+      ws.terminate();
     });
-    ws.on('error', (err) => this.#ctx.log('relay-error', { error: err.message }));
+    ws.on('error', (err) => {
+      if (!rejected) this.#ctx.log('relay-error', { error: err.message });
+    });
     ws.on('close', () => {
       if (this.#control !== ws) return;
       this.#control = null;
@@ -139,10 +165,10 @@ export class RelayLink {
       entry.handler.receive(new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength));
     });
     ws.on('error', () => {});
-    ws.on('unexpected-response', (req, res) => {
-      req.destroy();
-      // 404: the relay forgot this session.
+    ws.on('unexpected-response', (_req, res) => {
+      // 404: the relay forgot this session. Otherwise 'close' retries.
       if (res.statusCode === 404) entry.handler.end('relay no longer knows this session');
+      ws.terminate();
     });
     ws.on('close', (code: number) => {
       if (entry.ws !== ws) return;

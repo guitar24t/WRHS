@@ -138,6 +138,34 @@ export function createRelay(opts: RelayOptions): Relay {
     return got.length === expected.length && timingSafeEqual(got, expected);
   }
 
+  // Rejected agent connections, so a misregistered agent shows up in the log.
+  // Anyone can cause these, so at most one line per 10 s.
+  let rejectLoggedAt = 0;
+  let rejectsSuppressed = 0;
+  function logAgentRejected(agentId: string, req: IncomingMessage): void {
+    const now = Date.now();
+    if (now - rejectLoggedAt < 10_000) {
+      rejectsSuppressed++;
+      return;
+    }
+    rejectLoggedAt = now;
+    const valid = /^[0-9a-f]{32}$/.test(agentId);
+    const reason = !valid
+      ? 'invalid agent id'
+      : !opts.agentTokens?.has(agentId)
+        ? 'not in the agents file'
+        : bearer(req)
+          ? 'wrong token'
+          : 'no token';
+    log('agent-rejected', {
+      ...(valid ? { agentId } : {}),
+      reason,
+      ip: clientIp(req),
+      ...(rejectsSuppressed ? { alsoRejected: rejectsSuppressed } : {}),
+    });
+    rejectsSuppressed = 0;
+  }
+
   function newSid(): string {
     return randomBytes(18).toString('base64url');
   }
@@ -483,7 +511,10 @@ export function createRelay(opts: RelayOptions): Relay {
 
     if (path === '/v1/agent/control') {
       const agentId = url.searchParams.get('agent') ?? '';
-      if (!agentAuthorized(agentId, bearer(req))) return reject(401, 'Unauthorized');
+      if (!agentAuthorized(agentId, bearer(req))) {
+        logAgentRejected(agentId, req);
+        return reject(401, 'Unauthorized');
+      }
       wss.handleUpgrade(req, socket, head, (ws) => onAgentControl(ws, agentId));
       return;
     }

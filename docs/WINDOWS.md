@@ -181,7 +181,7 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -RemoveData # deletes t
 
 | Symptom | Check |
 |---|---|
-| "Your agent is not connected to the relay" | The service's log; the relay registration line; outbound HTTPS from the PC. |
+| "Your agent is not connected to the relay" | The last `relay-…` line in `wrhs-agent-service.out.log`: `relay-rejected` comes with a hint (401: the relay registration is missing or different; `"server": "cloudflare"`: Cloudflare's security settings). The agent keeps retrying, so it connects within 30 s of being added to the relay. |
 | "Remote Desktop is not accepting connections on This PC" | `Get-Service TermService`; Remote Desktop on in Settings → System → Remote Desktop. |
 | "This PC did not accept the user name or password" | Use the Windows account's password (not the PIN). For a Microsoft account, use its email address. |
 | "This PC does not let this account connect remotely" | Add the account to Remote Desktop Users (`-RemoteDesktopUser`). |

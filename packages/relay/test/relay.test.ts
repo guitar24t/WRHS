@@ -56,3 +56,25 @@ test('session opens are limited per client address', async () => {
     await relay.close();
   }
 });
+
+test('rejected agents are logged, at most once per 10 s', async () => {
+  const known = 'cd'.repeat(16);
+  const log: Record<string, unknown>[] = [];
+  const relay = createRelay({
+    agentTokens: new Map([[known, Buffer.alloc(32)]]),
+    log: (event, fields) => log.push({ event, ...fields }),
+  });
+  const port = await relay.listen(0, '127.0.0.1');
+  const tryAgent = (id: string, auth = '') =>
+    rawRequest(port, `GET /v1/agent/control?agent=${id} HTTP/1.1\r\nHost: x\r\n${auth}${UPGRADE}\r\n`);
+  try {
+    assert.match(await tryAgent(known, 'Authorization: Bearer wrong\r\n'), /^HTTP\/1\.1 401/);
+    assert.match(await tryAgent('ef'.repeat(16)), /^HTTP\/1\.1 401/);
+    assert.match(await tryAgent('ef'.repeat(16)), /^HTTP\/1\.1 401/);
+    const rejected = log.filter((e) => e.event === 'agent-rejected');
+    assert.equal(rejected.length, 1);
+    assert.deepEqual(rejected[0], { event: 'agent-rejected', agentId: known, reason: 'wrong token', ip: '127.0.0.1' });
+  } finally {
+    await relay.close();
+  }
+});
