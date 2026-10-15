@@ -113,8 +113,10 @@ ensure_node() {
       gpg --dearmor --yes -o /etc/apt/keyrings/nodesource.gpg
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_$NODE_MAJOR.x nodistro main" \
       >/etc/apt/sources.list.d/nodesource.list
-    apt_repo_added
-    apt_install nodejs
+    # Not apt_install: an older nodejs from the distribution is replaced too.
+    apt-get update -qq
+    APT_UPDATED=1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >/dev/null
     usable_node /usr/bin/node || die "Node.js $NODE_MIN or later is required; /usr/bin/node is $(/usr/bin/node --version 2>&1)"
     NODE=/usr/bin/node
   fi

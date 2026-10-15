@@ -136,7 +136,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install the relay behind Caddy
-        run: sudo deploy/relay/install.sh --domain localhost
+        run: |
+          # As on a server with the distribution's older Node.js: the installer
+          # must bring in Node.js 22 from NodeSource.
+          sudo mv /usr/local/bin/node /usr/local/bin/node.runner
+          sudo apt-get update -qq && sudo apt-get install -y -qq nodejs
+          /usr/bin/node --version
+          sudo deploy/relay/install.sh --domain localhost
+          grep -qx 'ExecStart=/usr/bin/node /opt/wrhs-relay/packages/relay/src/main.ts' /etc/systemd/system/wrhs-relay.service
+          /usr/bin/node --version | grep '^v22\.'
       - name: The relay answers through Caddy, as its own user
         run: |
           systemctl is-active wrhs-relay caddy
