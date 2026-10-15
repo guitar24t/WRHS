@@ -141,8 +141,12 @@ agent's JSON audit log: sign-ins, desktops opened, failures).
 
 The same accounts that can use Remote Desktop: administrators, plus members
 of **Remote Desktop Users**. For a Microsoft account, sign in with its email
-address and password (not the Windows Hello PIN). The account needs a
-password.
+address and password (not the Windows Hello PIN), and leave the domain
+empty. The account needs a password, and Windows must allow password
+sign-in. Turn off *Settings → Accounts → Sign-in options → "For improved
+security, only allow Windows Hello sign-in for Microsoft accounts on this
+device"*. If you have only used a PIN on the PC so far, sign in there once
+with the password.
 
 ### Other computers on the network
 
