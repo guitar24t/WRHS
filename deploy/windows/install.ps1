@@ -8,8 +8,11 @@ What it does:
   * Checks that this edition of Windows can host Remote Desktop sessions
     (Pro, Enterprise, Education or Server; Home cannot).
   * Turns on Remote Desktop with Network Level Authentication.
-  * Blocks Remote Desktop from the network (unless -AllowNetworkRdp), so the
-    only way in is through WRHS: the agent connects to it over loopback.
+  * Blocks Remote Desktop from the network, so the only way in is through
+    WRHS: the agent connects to it over loopback. With -AllowNetworkRdp it
+    stays reachable on the local network too. An upgrade keeps the choice.
+    It does not block while someone is connected over the network (that
+    would disconnect them) unless you pass -BlockNetworkRdp.
   * Copies the agent to %ProgramFiles%\WRHS. Its configuration and identity
     key live in %ProgramData%\WRHS, readable only by Administrators, SYSTEM
     and the service.
@@ -39,7 +42,13 @@ Windows account to add to "Remote Desktop Users". Administrators can already
 connect; other accounts need this.
 
 .PARAMETER AllowNetworkRdp
-Leave Remote Desktop reachable from the local network as well.
+Keep Remote Desktop reachable from the local network as well, for regular
+Remote Desktop clients. Turns on Windows' own Remote Desktop firewall rules
+(as Settings does) and removes WRHS's block. Remembered for upgrades.
+
+.PARAMETER BlockNetworkRdp
+Block Remote Desktop from the network (the default for a new installation),
+even if it was allowed before or someone is connected over the network now.
 
 .PARAMETER LauncherOut
 Where to write the launcher. Default: WRHS launcher.html on your desktop.
@@ -62,6 +71,7 @@ param(
   [string]$User,
   [string]$RemoteDesktopUser,
   [switch]$AllowNetworkRdp,
+  [switch]$BlockNetworkRdp,
   [string]$LauncherOut,
   [string]$WinSWPath,
   [string]$NodePath
@@ -91,6 +101,15 @@ $SidRemoteDesktopUsers = 'S-1-5-32-555'
 $RdpFirewallGroup = '@FirewallAPI.dll,-28752'
 
 function Step([string]$Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
+
+function Get-NetworkRdpClient([int]$Port) {
+  # Addresses connected to Remote Desktop, other than over loopback (WRHS).
+  Get-NetTCPConnection -LocalPort $Port -State Established -ErrorAction SilentlyContinue | ForEach-Object {
+    $a = [Net.IPAddress]::Parse($_.RemoteAddress)
+    if ($a.IsIPv4MappedToIPv6) { $a = $a.MapToIPv4() }
+    if (-not [Net.IPAddress]::IsLoopback($a)) { $a.ToString() }
+  } | Sort-Object -Unique
+}
 
 function Invoke-Agent {
   # Runs the agent CLI against the installed configuration.
@@ -134,6 +153,30 @@ foreach ($f in @($bundle, $template)) {
 }
 if (-not (Test-Path $ConfigPath) -and -not $RelayUrl) { throw '-RelayUrl is required for the first installation.' }
 
+# Remote Desktop from the network: as asked, else as the last installation
+# left it, else blocked.
+if ($AllowNetworkRdp -and $BlockNetworkRdp) { throw 'Use -AllowNetworkRdp or -BlockNetworkRdp, not both.' }
+$tsKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+$rdpTcpKey = "$tsKey\WinStations\RDP-Tcp"
+$rdpPort = [int](Get-ItemProperty $rdpTcpKey).PortNumber
+$blockInPlace = [bool](Get-NetFirewallRule -Name 'WRHS-Block-RDP-TCP' -ErrorAction SilentlyContinue)
+$networkRdp = 'block'
+if ($AllowNetworkRdp) {
+  $networkRdp = 'allow'
+} elseif (-not $BlockNetworkRdp -and (Test-Path $StatePath)) {
+  $previous = Get-Content -Raw -Path $StatePath | ConvertFrom-Json
+  if ($previous.PSObject.Properties['networkRdp']) { $networkRdp = $previous.networkRdp }
+  elseif (-not $blockInPlace) { $networkRdp = 'allow' } # installed with -AllowNetworkRdp by an older version
+}
+if ($networkRdp -eq 'block' -and -not $blockInPlace -and -not $BlockNetworkRdp) {
+  $clients = @(Get-NetworkRdpClient $rdpPort)
+  if ($clients.Count -gt 0) {
+    throw ("Remote Desktop is in use from the network ($($clients -join ', ')), perhaps by you. Blocking it would disconnect " +
+      'those sessions. Run this again with -AllowNetworkRdp to keep Remote Desktop reachable on the local network as well, ' +
+      'or with -BlockNetworkRdp to block it anyway.')
+  }
+}
+
 # ---------------------------------------------------------------- folders
 
 Step "Installing files to $AppDir"
@@ -156,8 +199,6 @@ Copy-Item -Force $bundle, $template -Destination $AppDir
 # ---------------------------------------------------------------- Remote Desktop
 
 Step 'Turning on Remote Desktop with Network Level Authentication'
-$tsKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
-$rdpTcpKey = "$tsKey\WinStations\RDP-Tcp"
 if (-not (Test-Path $StatePath)) {
   # Remember how things were, so uninstall.ps1 can put them back.
   $state = [ordered]@{
@@ -170,11 +211,14 @@ if (-not (Test-Path $StatePath)) {
 }
 Set-ItemProperty -Path $tsKey -Name fDenyTSConnections -Value 0 -Type DWord
 Set-ItemProperty -Path $rdpTcpKey -Name UserAuthentication -Value 1 -Type DWord
-$rdpPort = [int](Get-ItemProperty $rdpTcpKey).PortNumber
 Start-Service -Name TermService
 
-if ($AllowNetworkRdp) {
-  Write-Host '    Remote Desktop stays reachable from the local network (-AllowNetworkRdp).'
+if ($networkRdp -eq 'allow') {
+  Step "Keeping Remote Desktop (port $rdpPort) reachable from the local network"
+  Remove-NetFirewallRule -Name 'WRHS-Block-RDP-TCP', 'WRHS-Block-RDP-UDP' -ErrorAction SilentlyContinue
+  # The rules Windows turns on when Remote Desktop is enabled in Settings.
+  Get-NetFirewallRule -Group $RdpFirewallGroup -ErrorAction SilentlyContinue | Enable-NetFirewallRule
+  if (-not $AllowNetworkRdp) { Write-Host '    (as the last installation left it; -BlockNetworkRdp blocks it)' }
 } else {
   Step "Blocking Remote Desktop (port $rdpPort) from the network; WRHS reaches it over loopback"
   Get-NetFirewallRule -Group $RdpFirewallGroup -ErrorAction SilentlyContinue | Disable-NetFirewallRule
@@ -185,6 +229,9 @@ if ($AllowNetworkRdp) {
   New-NetFirewallRule -Name 'WRHS-Block-RDP-UDP' -DisplayName 'WRHS: block Remote Desktop from the network (UDP)' `
     -Direction Inbound -Protocol UDP -LocalPort $rdpPort -Action Block -Profile Any | Out-Null
 }
+$state = Get-Content -Raw -Path $StatePath | ConvertFrom-Json
+$state | Add-Member -Force -NotePropertyName networkRdp -NotePropertyValue $networkRdp
+$state | ConvertTo-Json | Set-Content -Encoding UTF8 -Path $StatePath
 
 $listening = $false
 for ($i = 0; $i -lt 30 -and -not $listening; $i++) {

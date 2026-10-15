@@ -24,6 +24,8 @@ $ServiceId = 'WRHSAgent'
 $AppDir = Join-Path $env:ProgramFiles 'WRHS'
 $DataDir = Join-Path $env:ProgramData 'WRHS'
 $StatePath = Join-Path $DataDir 'install-state.json'
+# Resource name of Windows' built-in "Remote Desktop" firewall rule group.
+$RdpFirewallGroup = '@FirewallAPI.dll,-28752'
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -53,8 +55,10 @@ if (Test-Path $StatePath) {
   if ($null -ne $state.UserAuthentication) {
     Set-ItemProperty -Path "$tsKey\WinStations\RDP-Tcp" -Name UserAuthentication -Value ([int]$state.UserAuthentication) -Type DWord
   }
-  foreach ($rule in @($state.enabledFirewallRules)) {
-    if ($rule) { Enable-NetFirewallRule -Name $rule -ErrorAction SilentlyContinue }
+  # Exactly the rules that were on before: -AllowNetworkRdp may have turned on others.
+  $wasEnabled = @($state.enabledFirewallRules)
+  foreach ($rule in @(Get-NetFirewallRule -Group $RdpFirewallGroup -ErrorAction SilentlyContinue)) {
+    if ($wasEnabled -contains $rule.Name) { $rule | Enable-NetFirewallRule } else { $rule | Disable-NetFirewallRule }
   }
   Remove-Item -Force $StatePath
 }
