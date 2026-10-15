@@ -6,6 +6,7 @@
 
 import * as rdp from '@devolutions/iron-remote-desktop-rdp';
 import type { AppChannel, SecureSession } from '@wrhs/protocol';
+import { nlaUsername } from './rdp-credentials.ts';
 import {
   isTouchDevice,
   showSoftKeyboard,
@@ -179,7 +180,7 @@ export class RdpDesktop implements DesktopView {
     this.#tunnel = bindRdpTunnel(this.#app);
     const o = this.#o;
     const builder = new rdp.Backend.SessionBuilder()
-      .username(o.username)
+      .username(o.nla ? nlaUsername(o.username, o.domain) : o.username)
       .password(o.password)
       .serverDomain(o.domain ?? '')
       // The agent decides which computer this connects to; the name is only
