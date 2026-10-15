@@ -80,7 +80,7 @@ and can only talk to your relay. There is nothing to install. See
 | `test/browser` | Real-Chromium tests of the `file://` launcher (needs Playwright) |
 | `test/windows` | Windows CI check: Chromium to the runner's own Remote Desktop through the installed service |
 | `deploy/windows` | Windows installer and uninstaller (`npm run package:windows`) |
-| `deploy/` | Docker Compose for the relay (with Caddy), a Linux agent (with guacd), and a local demo |
+| `deploy/` | Docker Compose for the relay (with Caddy), a native relay installer (`deploy/relay/install.sh`), a Linux agent (with guacd), and a local demo |
 | `docs/` | [Windows](docs/WINDOWS.md), [design](docs/DESIGN.md), [threat model](docs/THREAT_MODEL.md), [protocol spec](docs/PROTOCOL.md), [deployment](docs/DEPLOYMENT.md) |
 
 ## Quick start: this Windows PC
@@ -95,7 +95,9 @@ npm run package:windows
 powershell -ExecutionPolicy Bypass -File .\dist\windows\install.ps1 -RelayUrl https://relay.example.com -User alice
 ```
 
-You also need a relay ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#1-relay)).
+You also need a relay ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#1-relay)): Docker
+Compose, or `sudo deploy/relay/install.sh --domain relay.example.com` on a
+Debian or Ubuntu server.
 Everything else is in [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ## Local demo (Linux, Docker)

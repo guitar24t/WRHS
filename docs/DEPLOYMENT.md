@@ -38,8 +38,58 @@ cp agents.json.example agents.json   # no agents yet; you add them at step 2
 RELAY_DOMAIN=relay.example.com docker compose up -d
 ```
 
-Caddy obtains a certificate automatically and proxies to the relay. Relay
-settings, all environment variables:
+Caddy obtains a certificate automatically and proxies to the relay.
+
+### Without Docker (Debian or Ubuntu)
+
+`deploy/relay/install.sh` installs the relay as a systemd service. It sets
+up everything the Docker setup does:
+
+- Node.js 22 (from NodeSource, if a recent enough one is not installed).
+- The `wrhs-relay` service, running as its own system user and listening on
+  127.0.0.1 only.
+- HTTPS in front of it.
+
+```bash
+git clone https://github.com/guitar24t/WRHS.git && cd WRHS
+
+# Caddy with a Let's Encrypt certificate (DNS must point here, ports 80/443 open):
+sudo deploy/relay/install.sh --domain relay.example.com
+
+# Or a Cloudflare Tunnel, with no open ports. Create the tunnel in the
+# Cloudflare dashboard (Networks → Tunnels); its public hostname goes to
+# HTTP localhost:8080. Pass the tunnel's token:
+sudo deploy/relay/install.sh --domain relay.example.com --tls cloudflare --tunnel-token <token>
+
+# Or your own reverse proxy, pointed at 127.0.0.1:8080:
+sudo deploy/relay/install.sh --tls none
+```
+
+The script checks `https://<domain>/healthz` at the end. Then manage it with:
+
+```bash
+sudo deploy/relay/install.sh add-agent '<registration entry>'   # from the agent (step 2); restarts the relay
+sudo deploy/relay/install.sh list-agents
+sudo deploy/relay/install.sh remove-agent 5c7f612b9b0803b5c3a6765e1bfe0cf2
+sudo deploy/relay/install.sh status
+journalctl -u wrhs-relay -f                                      # the relay's log
+sudo deploy/relay/install.sh uninstall                           # keeps /etc/wrhs-relay; --purge removes it
+```
+
+Running the script again (after `git pull`) upgrades the relay. It keeps
+the configuration and agents, and it goes back to the previous version if
+the new one does not start. Files:
+
+| Path | Contents |
+|---|---|
+| `/opt/wrhs-relay` | The relay code |
+| `/etc/wrhs-relay/agents.json` | Registered agents |
+| `/etc/wrhs-relay/relay.env` | Relay settings (the variables below); `systemctl restart wrhs-relay` after editing |
+| `/etc/caddy/wrhs-relay.caddy` | The Caddy site, imported from `/etc/caddy/Caddyfile` |
+
+### Relay settings
+
+All are environment variables:
 
 | Variable | Meaning |
 |---|---|
@@ -84,7 +134,8 @@ relay's `agents.json` (`$CLI registration` prints it again, as JSON):
 
 Add the entry to `agents.json` on the relay host (one entry per agent, in
 the same `{ }`) and restart the relay: `docker compose restart relay`. It
-reads the file only at startup. If you will use
+reads the file only at startup. With the native install, run
+`sudo deploy/relay/install.sh add-agent '<entry>'` instead, which does both. If you will use
 guacd targets, edit `data/agent.json` and set
 `"guacd": {"host": "guacd", "port": 4822}`.
 
