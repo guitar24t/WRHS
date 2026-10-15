@@ -80,7 +80,8 @@ only way in.
 | `-Name <name>` | Agent name shown to users (default: computer name). |
 | `-User <name>` | Create a WRHS user (password from the prompt or `$env:WRHS_PASSWORD`). |
 | `-RemoteDesktopUser <account>` | Add a Windows account to "Remote Desktop Users". Administrators can already connect. |
-| `-AllowNetworkRdp` | Do not block Remote Desktop from the local network. |
+| `-AllowNetworkRdp` | Keep Remote Desktop reachable from the local network too, for regular Remote Desktop clients. Remembered for upgrades. |
+| `-BlockNetworkRdp` | Block Remote Desktop from the network again, or block it even though someone is connected over the network now. |
 | `-LauncherOut <file>` | Where to write the launcher. |
 | `-WinSWPath <file>` | Use a local copy of the service wrapper. |
 | `-NodePath <node.exe>` | Node.js to run the agent with (default: the one on PATH). |
@@ -88,12 +89,29 @@ only way in.
 Running `install.ps1` again upgrades the agent. The configuration, users and
 identity key are kept, so existing launchers keep working.
 
+### Regular Remote Desktop on the local network too
+
+By default the installer blocks Remote Desktop from the network, so WRHS is
+the only way in. If people on your network also connect with a regular
+Remote Desktop client, keep it open:
+
+```powershell
+.\install.ps1 -RelayUrl https://relay.example.com -User alice -AllowNetworkRdp
+.\install.ps1 -AllowNetworkRdp      # on an installed PC: opens it again
+.\install.ps1 -BlockNetworkRdp      # back to WRHS only
+```
+
+The choice is kept when you upgrade. If someone is connected over the network
+when the installer would block Remote Desktop, it stops without changing
+anything, because blocking would disconnect them. Rerun it with one of the
+two options.
+
 ## What the installer changes
 
 | Where | Change |
 |---|---|
 | Remote Desktop | Turned on (`fDenyTSConnections = 0`), with Network Level Authentication required (`UserAuthentication = 1`). |
-| Windows Firewall | Windows' built-in "Remote Desktop" rules are disabled, and rules `WRHS-Block-RDP-TCP/UDP` block the RDP port from the network. Windows Firewall does not filter loopback, so the agent still connects. Skipped with `-AllowNetworkRdp`. |
+| Windows Firewall | Windows' built-in "Remote Desktop" rules are disabled, and rules `WRHS-Block-RDP-TCP/UDP` block the RDP port from the network. Windows Firewall does not filter loopback, so the agent still connects. With `-AllowNetworkRdp`: no WRHS rules, and Windows' "Remote Desktop" rules are turned on, as Settings does. |
 | `%ProgramFiles%\WRHS` | The agent (`wrhs-agent.mjs`), the launcher template, and the service wrapper and its XML. |
 | `%ProgramData%\WRHS` | `agent.json` (users, targets, policy), `agent.key.json` (identity key) and `logs\`. Only Administrators and SYSTEM have access; the service can read, and write its logs. |
 | Services | **WRHS Agent** (`WRHSAgent`): automatic start, restart on failure, runs as `NT AUTHORITY\LocalService`. |
